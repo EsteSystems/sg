@@ -1,0 +1,23 @@
+[project]
+name = "sg"
+version = "0.1.0"
+description = "Software Genomics — evolutionary software runtime"
+requires-python = ">=3.11"
+dependencies = [
+    "tomli>=2.0; python_version<'3.12'",
+    "tomli_w>=1.0",
+]
+
+[project.optional-dependencies]
+claude = ["httpx>=0.27"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+sg = "sg.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sg*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

@@ -1,0 +1,25 @@
+pathway configure_bridge_with_stp
+  risk low
+
+  does:
+    Create a bridge and configure STP on it. This is the standard
+    two-step bridge provisioning pathway.
+
+  takes:
+    bridge_name    string    "Name for the bridge"
+    interfaces     string[]  "Physical interfaces to attach"
+    stp_enabled    bool      "Enable STP"
+    forward_delay  int       "Forward delay in seconds"
+
+  steps:
+    1. bridge_create
+         bridge_name = {bridge_name}
+         interfaces = {interfaces}
+
+    2. bridge_stp
+         bridge_name = {bridge_name}
+         stp_enabled = {stp_enabled}
+         forward_delay = {forward_delay}
+
+  on failure:
+    rollback all

@@ -1,0 +1,33 @@
+gene bridge_stp
+  is configuration
+  risk low
+
+  does:
+    Configure Spanning Tree Protocol on an existing bridge. STP prevents
+    loops in bridged networks by blocking redundant paths. The forward
+    delay controls how long a port waits before forwarding traffic after
+    a topology change.
+
+  takes:
+    bridge_name    string  "Name of the existing bridge"
+    stp_enabled    bool    "Enable or disable STP"
+    forward_delay  int     "Forward delay in seconds (1-30)"
+
+  gives:
+    success  bool    "Whether STP was configured"
+    error    string? "Error message on failure"
+
+  before:
+    - Bridge exists
+
+  after:
+    - STP state matches requested configuration
+    - Forward delay is set to requested value
+
+  fails when:
+    - bridge does not exist -> success=false
+    - forward_delay out of range -> success=false
+
+  verify:
+    check_link_state device={bridge_name}
+    within 30s

@@ -1,0 +1,35 @@
+gene bridge_create
+  is configuration
+  risk low
+
+  does:
+    Create a Linux bridge with the given interfaces. The bridge is the
+    fundamental L2 primitive — it connects physical NICs, VLAN interfaces,
+    and VM virtual NICs into a single broadcast domain.
+
+    For VLAN bridges, always disable STP. STP topology changes trigger
+    FDB flushes that disrupt VM traffic on leaf bridges where loops
+    are impossible.
+
+  takes:
+    bridge_name  string    "Name for the bridge"
+    interfaces   string[]  "Physical interfaces to attach as ports"
+
+  gives:
+    success            bool      "Whether the bridge was created"
+    resources_created  string[]  "NM connections created, for rollback"
+    error              string?   "Error message on failure"
+
+  before:
+    - Bridge with this name does not already exist
+    - All specified interfaces exist and are not enslaved
+
+  after:
+    - Bridge exists and is in UP state
+    - All specified interfaces are attached as bridge ports
+    - NM connection is created and tracked in genome state
+
+  fails when:
+    - bridge already exists -> success=false
+    - interface not found -> success=false
+    - NM D-Bus unavailable -> error

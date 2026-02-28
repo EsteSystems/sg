@@ -217,8 +217,10 @@ class TestFederationEndpoints:
         assert len(alleles) >= 1
 
         # Modify source slightly and push back as a "foreign" allele
+        from sg.federation import compute_source_sha
         foreign = alleles[0].copy()
         foreign["source"] = foreign["source"] + "\n# imported from peer"
+        foreign["source_sha256"] = compute_source_sha(foreign["source"])
         foreign["generation"] = foreign.get("generation", 0) + 1
 
         resp = client.post("/api/federation/receive", json=foreign)

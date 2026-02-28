@@ -1,0 +1,28 @@
+gene check_vlan_trunk
+  is diagnostic
+  risk none
+
+  does:
+    Check VLAN trunk connectivity by verifying that expected
+    VLANs are configured on the trunk interface and that
+    traffic can pass through.
+
+  takes:
+    trunk_interface  string  "Trunk interface name"
+    expected_vlans   int[]   "Expected VLAN IDs"
+
+  gives:
+    success    bool     "Overall health status"
+    healthy    bool     "Whether trunk is healthy"
+    vlans_ok   int[]    "VLANs that are configured correctly"
+    vlans_missing int[] "VLANs that are missing"
+
+  before:
+    trunk interface must exist
+
+  after:
+    no side effects — diagnostic only
+
+  fails when:
+    trunk interface does not exist
+    trunk interface is not configured as a trunk

@@ -43,6 +43,11 @@ class MutationEngine(ABC):
         """Generate a fused gene combining multiple genes into one."""
         raise NotImplementedError("this engine does not support fusion generation")
 
+    def generate_contract(self, family: str, context: str,
+                          existing_loci: list[str]) -> str:
+        """Generate a new .sg contract from context. Returns raw .sg source."""
+        raise NotImplementedError("this engine does not support contract generation")
+
 
 class MockMutationEngine(MutationEngine):
     """Loads fixture files as mutation results. For development/testing."""
@@ -68,6 +73,13 @@ class MockMutationEngine(MutationEngine):
         fixture_path = self.fixtures_dir / f"{pathway_name}_fused.py"
         if not fixture_path.exists():
             raise FileNotFoundError(f"no fusion fixture at {fixture_path}")
+        return fixture_path.read_text()
+
+    def generate_contract(self, family: str, context: str,
+                          existing_loci: list[str]) -> str:
+        fixture_path = self.fixtures_dir / "generated_contract.sg"
+        if not fixture_path.exists():
+            raise FileNotFoundError(f"no contract generation fixture at {fixture_path}")
         return fixture_path.read_text()
 
 
@@ -245,6 +257,37 @@ away intermediate JSON serialization where possible. The gene must:
 Return ONLY the Python source code in a ```python``` block."""
         text = self._call_api(prompt)
         return self._extract_python(text)
+
+
+    def generate_contract(self, family: str, context: str,
+                          existing_loci: list[str]) -> str:
+        existing_list = "\n".join(f"  - {l}" for l in existing_loci) if existing_loci else "  (none)"
+        prompt = f"""You are a contract generation engine for the Software Genomics runtime.
+
+A contract is a .sg file that defines a gene locus (typed slot for implementations).
+
+## Existing loci (avoid duplicating):
+{existing_list}
+
+## Context
+{context}
+
+## Gene family
+{family}
+
+## Task
+Write a new gene contract in .sg format. The contract must:
+1. Start with `gene <name>`
+2. Specify `is {family}`
+3. Set `risk none`
+4. Include `does:` (prose description), `takes:` (input fields), `gives:` (output fields)
+5. Include `before:` (preconditions) and `after:` (postconditions)
+6. Include `fails when:` (failure modes)
+7. Use descriptive field names and types (string, bool, int, string[])
+8. NOT duplicate any existing locus name
+
+Return ONLY the .sg contract text, no markdown fences."""
+        return self._call_api(prompt).strip()
 
 
 class ClaudeMutationEngine(LLMMutationEngine):

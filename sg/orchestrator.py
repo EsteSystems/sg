@@ -19,6 +19,7 @@ from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contr
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 from sg.safety import Transaction, SafeKernel, requires_transaction, is_shadow_only, SHADOW_PROMOTION_THRESHOLD
+from sg.regression import RegressionDetector
 from sg.verify import VerifyScheduler, parse_duration
 
 
@@ -44,6 +45,7 @@ class Orchestrator:
         self.contract_store = contract_store
         self.project_root = project_root
         self.verify_scheduler = VerifyScheduler()
+        self.regression_detector = RegressionDetector()
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
 
     def _get_risk(self, locus: str) -> BlastRadius:
@@ -101,6 +103,7 @@ class Orchestrator:
                 self._process_diagnostic_feedback(locus, result)
                 self._schedule_verify(locus, input_json)
                 self._check_promotion(locus, sha)
+                self._check_regression(locus, sha, input_json)
                 print(f"  [{locus}] success via {sha[:12]} "
                       f"(fitness: {arena.compute_fitness(allele):.2f})")
                 return (result, sha)
@@ -302,6 +305,45 @@ class Orchestrator:
         if allele and arena.should_demote(allele):
             arena.set_deprecated(allele)
             print(f"  [arena] demoted {sha[:12]} for {locus} (3 consecutive failures)")
+
+    def _check_regression(self, locus: str, sha: str, input_json: str) -> None:
+        """Check for fitness regression and respond proactively."""
+        allele = self.registry.get(sha)
+        if allele is None:
+            return
+        severity = self.regression_detector.record(allele)
+        if severity == "severe":
+            arena.set_deprecated(allele)
+            print(f"  [regression] severe regression for {sha[:12]}, demoting")
+        elif severity == "mild":
+            print(f"  [regression] mild regression for {sha[:12]}, "
+                  f"proactive mutation queued")
+            self._queue_proactive_mutation(locus, input_json)
+
+    def _queue_proactive_mutation(self, locus: str, input_json: str) -> None:
+        """Generate a competing allele without waiting for total failure."""
+        dominant_sha = self.phenotype.get_dominant(locus)
+        if not dominant_sha:
+            return
+
+        if hasattr(self.mutation_engine, '_contract_prompt'):
+            contract_prompt = self.mutation_engine._contract_prompt(locus)
+        else:
+            contract_prompt = f"Locus: {locus}"
+
+        try:
+            sources = self.mutation_engine.generate(locus, contract_prompt, 1)
+            for source in sources:
+                parent = self.registry.get(dominant_sha)
+                gen = (parent.generation + 1) if parent else 1
+                sha = self.registry.register(source, locus, gen, dominant_sha)
+                self.phenotype.add_to_fallback(locus, sha)
+                allele = self.registry.get(sha)
+                if allele:
+                    allele.state = "recessive"
+                print(f"  [regression] proactive mutant registered: {sha[:12]}")
+        except Exception as e:
+            print(f"  [regression] proactive mutation failed: {e}")
 
     def run_pathway(self, pathway_name: str, input_json: str) -> list[str]:
         """Execute a named pathway.

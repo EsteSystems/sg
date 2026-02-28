@@ -132,6 +132,14 @@ class ContractStore:
         """Return all known topology names."""
         return list(self.topologies.keys())
 
+    def register_contract(self, source: str, path: Path) -> str:
+        """Write a contract source to disk and load it. Returns the contract name."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source)
+        self.load_file(path)
+        contract = parse_sg(source)
+        return contract.name
+
     @classmethod
     def open(cls, contracts_dir: Path) -> ContractStore:
         """Create a ContractStore by scanning a contracts directory."""

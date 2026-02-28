@@ -1,0 +1,30 @@
+gene check_fdb_stability
+  is diagnostic
+  risk none
+
+  does:
+    Analyze the forwarding database of a bridge for anomalies. Checks
+    for excessive FDB size, local entries, and duplicate MACs that
+    indicate network health issues.
+
+  takes:
+    bridge_name  string  "Bridge to check"
+
+  gives:
+    success        bool      "Whether the check completed"
+    healthy        bool      "Whether FDB looks healthy"
+    total_entries  int       "Total FDB entries"
+    local_entries  int       "Local (static) entries"
+    dynamic_entries int      "Dynamic (learned) entries"
+    anomalies      string[]  "Detected anomalies"
+    error          string?   "Error message on failure"
+
+  verify:
+    - FDB size is within expected bounds
+    - no duplicate MAC entries across ports
+
+  feeds:
+    bridge_create
+
+  fails when:
+    - bridge does not exist -> success=false

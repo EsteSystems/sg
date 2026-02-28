@@ -1,0 +1,29 @@
+gene bridge_uplink
+  is configuration
+  risk low
+
+  does:
+    Attach an uplink interface to an existing bridge. The uplink is the
+    interface that connects the bridge to the upstream network — typically
+    a physical NIC or a bond.
+
+  takes:
+    bridge_name  string  "Bridge to attach the uplink to"
+    uplink       string  "Interface to use as uplink"
+
+  gives:
+    success  bool    "Whether the uplink was attached"
+    error    string? "Error message on failure"
+
+  before:
+    - Bridge exists
+    - Uplink interface exists and is not already enslaved
+
+  after:
+    - Uplink interface is attached as a bridge port
+    - Bridge has connectivity to upstream network
+
+  fails when:
+    - bridge does not exist -> success=false
+    - uplink interface not found -> success=false
+    - uplink already enslaved -> success=false

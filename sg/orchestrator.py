@@ -7,12 +7,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from sg import arena
-from sg.contracts import validate_output, contract_info
+from sg.contracts import ContractStore, validate_output
 from sg.fusion import FusionTracker
 from sg.kernel.base import NetworkKernel
 from sg.loader import load_gene, call_gene
 from sg.mutation import MutationEngine, MutationContext
-from sg.pathway import Pathway, execute_pathway, PATHWAYS
+from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contract
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
@@ -28,6 +28,7 @@ class Orchestrator:
         mutation_engine: MutationEngine,
         fusion_tracker: FusionTracker,
         kernel: NetworkKernel,
+        contract_store: ContractStore,
         project_root: Path,
     ):
         self.registry = registry
@@ -35,6 +36,7 @@ class Orchestrator:
         self.mutation_engine = mutation_engine
         self.fusion_tracker = fusion_tracker
         self.kernel = kernel
+        self.contract_store = contract_store
         self.project_root = project_root
 
     def execute_locus(self, locus: str, input_json: str) -> tuple[str, str] | None:
@@ -157,11 +159,13 @@ class Orchestrator:
 
     def run_pathway(self, pathway_name: str, input_json: str) -> list[str]:
         """Execute a named pathway."""
-        pathway = PATHWAYS.get(pathway_name)
-        if pathway is None:
+        # Try to load pathway from contract store
+        pathway_contract = self.contract_store.get_pathway(pathway_name)
+        if pathway_contract is not None:
+            pathway = pathway_from_contract(pathway_contract)
+        else:
             raise ValueError(f"unknown pathway: {pathway_name}")
 
-        self.kernel.reset()
         print(f"Executing pathway: {pathway_name}")
 
         outputs = execute_pathway(

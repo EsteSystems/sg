@@ -1,0 +1,31 @@
+gene mac_preserve
+  is configuration
+  risk medium
+
+  does:
+    Preserve or set the MAC address on a device. When a bridge is created
+    from a bond, the bridge inherits a random MAC. This gene copies the
+    original uplink MAC to the bridge and sends a gratuitous ARP to update
+    upstream switches.
+
+  takes:
+    device      string  "Device to set the MAC on"
+    source_mac  string? "MAC to set (if omitted, reads from device)"
+    send_arp    bool?   "Send gratuitous ARP after MAC change (default true)"
+
+  gives:
+    success      bool    "Whether the MAC was preserved"
+    original_mac string? "Original MAC before change"
+    new_mac      string? "MAC after change"
+    error        string? "Error message on failure"
+
+  before:
+    - Device exists
+
+  after:
+    - Device has the specified MAC address
+    - Upstream switches notified via gratuitous ARP
+
+  fails when:
+    - device does not exist -> success=false
+    - invalid MAC format -> success=false

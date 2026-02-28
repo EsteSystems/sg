@@ -4,6 +4,7 @@ import shutil
 import pytest
 from pathlib import Path
 
+from sg.contracts import ContractStore
 from sg.fusion import FusionTracker, FUSION_THRESHOLD
 from sg.kernel.mock import MockNetworkKernel
 from sg.mutation import MockMutationEngine
@@ -14,6 +15,7 @@ from sg.registry import Registry
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
 GENES_DIR = Path(__file__).parent.parent / "genes"
+CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
 
 
 @pytest.fixture
@@ -24,6 +26,11 @@ def project(tmp_path):
         shutil.copytree(FIXTURE_DIR, fixtures_dst)
     else:
         fixtures_dst.mkdir()
+
+    # Copy contracts so ContractStore can discover them
+    contracts_dst = tmp_path / "contracts"
+    if CONTRACTS_DIR.exists():
+        shutil.copytree(CONTRACTS_DIR, contracts_dst)
 
     registry = Registry.open(tmp_path / ".sg" / "registry")
     phenotype = PhenotypeMap()
@@ -83,6 +90,7 @@ def execute(input_json):
 
 
 def make_orchestrator(project_root: Path) -> Orchestrator:
+    contract_store = ContractStore.open(project_root / "contracts")
     registry = Registry.open(project_root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(project_root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(project_root / "fusion_tracker.json")
@@ -95,6 +103,7 @@ def make_orchestrator(project_root: Path) -> Orchestrator:
         mutation_engine=mutation_engine,
         fusion_tracker=fusion_tracker,
         kernel=kernel,
+        contract_store=contract_store,
         project_root=project_root,
     )
 

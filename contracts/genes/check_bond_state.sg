@@ -1,0 +1,28 @@
+gene check_bond_state
+  is diagnostic
+  risk none
+
+  does:
+    Check the health of a network bond. Verifies that the bond is
+    active and all member interfaces have carrier.
+
+  takes:
+    bond_name  string  "Bond to check"
+
+  gives:
+    success       bool      "Whether the check completed"
+    healthy       bool      "Whether the bond is healthy"
+    active        bool      "Whether the bond is active"
+    members       string[]  "Bond member interfaces"
+    members_down  string[]  "Members with no carrier"
+    error         string?   "Error message on failure"
+
+  verify:
+    - bond is active
+    - all members have carrier
+
+  feeds:
+    bond_create
+
+  fails when:
+    - bond does not exist -> success=false

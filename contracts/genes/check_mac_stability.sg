@@ -1,0 +1,28 @@
+gene check_mac_stability
+  is diagnostic
+  risk none
+
+  does:
+    Check the FDB of a bridge for MAC address instability. MAC flapping
+    occurs when the same MAC is seen on multiple ports, indicating a loop,
+    misconfigured bonding, or a VM migration race condition.
+
+  takes:
+    bridge_name  string  "Bridge to check"
+
+  gives:
+    success         bool        "Whether the check completed"
+    healthy         bool        "Whether MAC addresses are stable"
+    total_macs      int         "Total unique MACs in FDB"
+    flapping_macs   string[]    "MACs seen on multiple ports"
+    error           string?     "Error message on failure"
+
+  verify:
+    - no MAC appears on more than one port
+
+  feeds:
+    bridge_create
+    mac_preserve
+
+  fails when:
+    - bridge does not exist -> success=false

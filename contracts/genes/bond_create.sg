@@ -1,0 +1,31 @@
+gene bond_create
+  is configuration
+  risk low
+
+  does:
+    Create a network bond from the specified member interfaces. Bonds
+    aggregate multiple physical NICs into a single logical link for
+    redundancy or increased bandwidth.
+
+  takes:
+    bond_name  string    "Name for the bond"
+    mode       string    "Bonding mode (802.3ad, active-backup, etc.)"
+    members    string[]  "Physical interfaces to bond"
+
+  gives:
+    success  bool    "Whether the bond was created"
+    bond     string? "Bond device name"
+    error    string? "Error message on failure"
+
+  before:
+    - Bond with this name does not already exist
+    - All member interfaces exist and are not enslaved
+
+  after:
+    - Bond device exists and is active
+    - All member interfaces are enslaved to the bond
+
+  fails when:
+    - bond already exists -> success=false
+    - member interface not found -> success=false
+    - invalid bonding mode -> success=false

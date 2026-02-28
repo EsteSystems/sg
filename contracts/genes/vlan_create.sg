@@ -1,0 +1,30 @@
+gene vlan_create
+  is configuration
+  risk low
+
+  does:
+    Create a VLAN interface on a parent device. VLANs partition a
+    physical link into isolated broadcast domains, each identified
+    by a numeric VLAN ID (1-4094).
+
+  takes:
+    parent   string  "Parent interface for the VLAN"
+    vlan_id  int     "VLAN ID (1-4094)"
+
+  gives:
+    success    bool    "Whether the VLAN was created"
+    vlan_name  string? "Name of the created VLAN interface"
+    error      string? "Error message on failure"
+
+  before:
+    - Parent interface exists
+    - VLAN ID is not already in use on this parent
+
+  after:
+    - VLAN interface exists as parent.vlan_id
+    - VLAN interface is in UP state
+
+  fails when:
+    - parent interface not found -> success=false
+    - VLAN already exists -> success=false
+    - invalid VLAN ID -> success=false

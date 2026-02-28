@@ -1,0 +1,30 @@
+gene check_link_state
+  is diagnostic
+  risk none
+
+  does:
+    Check the link state of a network interface. Reports carrier
+    presence, operational state, and MAC address.
+
+  takes:
+    interface  string  "Interface to check"
+
+  gives:
+    success    bool    "Whether the check completed"
+    healthy    bool    "Whether the link is up"
+    carrier    bool    "Whether the interface has carrier"
+    operstate  string  "Operational state (up, down, etc.)"
+    mac        string  "Current MAC address"
+    master     string? "Master device if enslaved"
+    error      string? "Error message on failure"
+
+  verify:
+    - interface has carrier
+    - operational state is up
+
+  feeds:
+    bridge_create
+    bond_create
+
+  fails when:
+    - interface does not exist -> success=false

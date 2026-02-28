@@ -1,0 +1,29 @@
+gene check_connectivity
+  is diagnostic
+  risk none
+
+  does:
+    Check whether a bridge is up and has carrier on its interfaces.
+    Returns the link state of the bridge and all attached ports.
+
+  takes:
+    bridge_name  string  "Bridge to check"
+
+  gives:
+    success     bool         "Whether the check completed"
+    healthy     bool         "Whether connectivity is healthy"
+    bridge_up   bool         "Whether the bridge itself is up"
+    ports       string[]     "List of attached interfaces"
+    ports_down  string[]     "Interfaces with no carrier"
+    error       string?      "Error message on failure"
+
+  verify:
+    - bridge interface has carrier
+    - all port interfaces have carrier
+
+  feeds:
+    bridge_create
+    bridge_uplink
+
+  fails when:
+    - bridge does not exist -> success=false

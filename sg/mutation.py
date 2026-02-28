@@ -10,8 +10,10 @@ import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from sg.contracts import contract_info
+if TYPE_CHECKING:
+    from sg.contracts import ContractStore
 
 
 @dataclass
@@ -57,8 +59,10 @@ class MockMutationEngine(MutationEngine):
 class ClaudeMutationEngine(MutationEngine):
     """Calls the Anthropic API to generate mutations."""
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-5-20250929"):
+    def __init__(self, api_key: str, contract_store: ContractStore,
+                 model: str = "claude-sonnet-4-5-20250929"):
         self.api_key = api_key
+        self.contract_store = contract_store
         self.model = model
 
     def _call_api(self, prompt: str) -> str:
@@ -91,18 +95,48 @@ class ClaudeMutationEngine(MutationEngine):
             return match.group(1).strip()
         return text.strip()
 
+    def _contract_prompt(self, locus: str) -> str:
+        """Build contract context for a mutation prompt."""
+        gene = self.contract_store.get_gene(locus)
+        if gene:
+            sections = [f"Locus: {locus}"]
+            if gene.does:
+                sections.append(f"Description:\n{gene.does}")
+            if gene.takes:
+                fields = "\n".join(
+                    f"  {f.name}: {f.type}" + (f" (optional)" if f.optional else "")
+                    for f in gene.takes
+                )
+                sections.append(f"Input fields:\n{fields}")
+            if gene.gives:
+                fields = "\n".join(
+                    f"  {f.name}: {f.type}" + (f" (optional)" if f.optional else "")
+                    for f in gene.gives
+                )
+                sections.append(f"Output fields:\n{fields}")
+            if gene.before:
+                sections.append("Preconditions:\n" + "\n".join(f"  - {c}" for c in gene.before))
+            if gene.after:
+                sections.append("Postconditions:\n" + "\n".join(f"  - {c}" for c in gene.after))
+            if gene.fails_when:
+                sections.append("Failure modes:\n" + "\n".join(f"  - {c}" for c in gene.fails_when))
+            return "\n\n".join(sections)
+        # Fallback if no .sg contract
+        try:
+            info = self.contract_store.contract_info(locus)
+            return f"Locus: {locus}\nDescription: {info.description}\nInput: {info.input_schema}\nOutput: {info.output_schema}"
+        except ValueError:
+            return f"Locus: {locus}"
+
     def mutate(self, ctx: MutationContext) -> str:
-        info = contract_info(ctx.locus)
+        contract_ctx = self._contract_prompt(ctx.locus)
         prompt = f"""You are a gene mutation engine for the Software Genomics runtime.
 
 A gene is a Python function that takes a JSON string and returns a JSON string.
 The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
 
 ## Contract
-Locus: {ctx.locus}
-Description: {info.description}
-Input schema: {info.input_schema}
-Output schema: {info.output_schema}
+{contract_ctx}
 
 ## Current gene source (failing):
 ```python
@@ -128,12 +162,8 @@ Return ONLY the Python source code in a ```python``` block."""
                        loci: list[str]) -> str:
         steps_desc = []
         for i, (source, locus) in enumerate(zip(gene_sources, loci)):
-            info = contract_info(locus)
-            steps_desc.append(f"""### Step {i + 1}: {locus}
-Description: {info.description}
-```python
-{source}
-```""")
+            contract_ctx = self._contract_prompt(locus)
+            steps_desc.append(f"### Step {i + 1}: {locus}\n{contract_ctx}\n```python\n{source}\n```")
 
         prompt = f"""You are a gene fusion engine for the Software Genomics runtime.
 

@@ -1,11 +1,13 @@
 """Pathway execution — declared sequences of loci with late binding.
 
-A Pathway is an ordered list of steps (loci + input transforms). Execution
-is fusion-aware: tries the fused gene first, falls back to decomposed steps.
+Pathways are loaded from .sg contracts or defined programmatically.
+Execution is fusion-aware: tries the fused gene first, falls back to
+decomposed steps. Input transforms are generated from {reference} syntax.
 """
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -14,6 +16,7 @@ from sg.fusion import FusionTracker, fuse_pathway, try_fused_execution
 from sg.mutation import MutationEngine
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
+from sg.parser.types import PathwayContract, PathwayStep as ASTPathwayStep
 
 
 @dataclass
@@ -39,12 +42,7 @@ def execute_pathway(
     mutation_engine: MutationEngine,
     kernel: NetworkKernel,
 ) -> list[str]:
-    """Execute a pathway, returning the list of step outputs.
-
-    1. Try fused execution first
-    2. Fall back to decomposed (step-by-step) execution
-    3. Track reinforcement for fusion
-    """
+    """Execute a pathway, returning the list of step outputs."""
     fused_result = try_fused_execution(
         pathway.name, input_json, registry, phenotype, fusion_tracker, kernel
     )
@@ -84,33 +82,39 @@ def execute_pathway(
     return outputs
 
 
-# --- Built-in pathways ---
+# --- Input transform generation from {reference} syntax ---
 
-def _bridge_create_transform(original_input: str, _previous: list[str]) -> str:
-    data = json.loads(original_input)
-    return json.dumps({
-        "bridge_name": data["bridge_name"],
-        "interfaces": data["interfaces"],
-    })
+def _make_reference_transform(params: dict[str, str]) -> Callable[[str, list[str]], str]:
+    """Generate an input transform function from parameter bindings.
+
+    params maps step param names to values. Values like {bridge_name}
+    are resolved from the pathway's original input.
+    """
+    def transform(original_input: str, _previous: list[str]) -> str:
+        data = json.loads(original_input)
+        result = {}
+        for param_name, param_value in params.items():
+            # {reference} — resolve from pathway input
+            match = re.fullmatch(r"\{(\w+)\}", param_value)
+            if match:
+                key = match.group(1)
+                if key in data:
+                    result[param_name] = data[key]
+            else:
+                # Literal value
+                result[param_name] = param_value
+        return json.dumps(result)
+    return transform
 
 
-def _bridge_stp_transform(original_input: str, _previous: list[str]) -> str:
-    data = json.loads(original_input)
-    return json.dumps({
-        "bridge_name": data["bridge_name"],
-        "stp_enabled": data["stp_enabled"],
-        "forward_delay": data["forward_delay"],
-    })
-
-
-CONFIGURE_BRIDGE_WITH_STP = Pathway(
-    name="configure_bridge_with_stp",
-    steps=[
-        PathwayStep(locus="bridge_create", input_transform=_bridge_create_transform),
-        PathwayStep(locus="bridge_stp", input_transform=_bridge_stp_transform),
-    ],
-)
-
-PATHWAYS: dict[str, Pathway] = {
-    "configure_bridge_with_stp": CONFIGURE_BRIDGE_WITH_STP,
-}
+def pathway_from_contract(contract: PathwayContract) -> Pathway:
+    """Convert a parsed PathwayContract into an executable Pathway."""
+    steps: list[PathwayStep] = []
+    for ast_step in contract.steps:
+        if isinstance(ast_step, ASTPathwayStep) and not ast_step.is_pathway_ref:
+            transform = _make_reference_transform(ast_step.params)
+            steps.append(PathwayStep(
+                locus=ast_step.locus,
+                input_transform=transform,
+            ))
+    return Pathway(name=contract.name, steps=steps)

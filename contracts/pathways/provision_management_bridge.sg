@@ -1,0 +1,34 @@
+pathway provision_management_bridge
+  risk medium
+
+  does:
+    Full management bridge provisioning. Creates a bridge, enables STP,
+    attaches the uplink interface, and preserves the original MAC address
+    so upstream switches maintain their forwarding tables.
+
+  takes:
+    bridge_name    string    "Name for the bridge"
+    interfaces     string[]  "Physical interfaces to attach"
+    uplink         string    "Uplink interface"
+    stp_enabled    bool      "Enable STP"
+    forward_delay  int       "Forward delay in seconds"
+
+  steps:
+    1. bridge_create
+         bridge_name = {bridge_name}
+         interfaces = {interfaces}
+
+    2. bridge_stp
+         bridge_name = {bridge_name}
+         stp_enabled = {stp_enabled}
+         forward_delay = {forward_delay}
+
+    3. bridge_uplink
+         bridge_name = {bridge_name}
+         uplink = {uplink}
+
+    4. mac_preserve
+         device = {bridge_name}
+
+  on failure:
+    rollback all

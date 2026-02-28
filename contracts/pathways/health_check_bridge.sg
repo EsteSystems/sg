@@ -1,0 +1,23 @@
+pathway health_check_bridge
+  risk none
+
+  does:
+    Run a health check on a bridge. Verifies connectivity, MAC address
+    stability, and FDB health. Used as a post-provisioning verification
+    and for ongoing monitoring.
+
+  takes:
+    bridge_name  string  "Bridge to check"
+
+  steps:
+    1. check_connectivity
+         bridge_name = {bridge_name}
+
+    2. check_mac_stability
+         bridge_name = {bridge_name}
+
+    3. check_fdb_stability
+         bridge_name = {bridge_name}
+
+  on failure:
+    report partial

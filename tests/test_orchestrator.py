@@ -2,6 +2,7 @@
 import json
 import pytest
 
+from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
 from sg.kernel.mock import MockNetworkKernel
 from sg.mutation import MockMutationEngine, MutationEngine, MutationContext
@@ -38,6 +39,7 @@ def project(tmp_path):
     fusion_tracker = FusionTracker()
     mutation_engine = MockMutationEngine(fixtures_dir)
     kernel = MockNetworkKernel()
+    contract_store = ContractStore()
 
     return {
         "root": tmp_path,
@@ -46,6 +48,7 @@ def project(tmp_path):
         "fusion_tracker": fusion_tracker,
         "mutation_engine": mutation_engine,
         "kernel": kernel,
+        "contract_store": contract_store,
     }
 
 
@@ -58,6 +61,7 @@ def orch(project):
         mutation_engine=project["mutation_engine"],
         fusion_tracker=project["fusion_tracker"],
         kernel=project["kernel"],
+        contract_store=project["contract_store"],
         project_root=project["root"],
     )
 

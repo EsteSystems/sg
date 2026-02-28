@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Union
 
 from sg.kernel.base import NetworkKernel
 from sg.fusion import FusionTracker, fuse_pathway, try_fused_execution
@@ -61,7 +61,7 @@ class ConditionalExecStep:
 
 
 # Union of all runtime step types
-RuntimeStep = PathwayStep | ComposedStep | LoopStep | ConditionalExecStep
+RuntimeStep = Union[PathwayStep, ComposedStep, LoopStep, ConditionalExecStep]
 
 
 @dataclass

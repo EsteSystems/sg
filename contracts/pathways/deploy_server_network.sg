@@ -1,0 +1,43 @@
+pathway deploy_server_network
+  risk medium
+
+  does:
+    Full server network deployment. Composes the management bridge pathway,
+    creates a bond for trunk traffic, then provisions VLANs on the bond.
+    Uses for-loop to iterate over the VLAN list.
+
+  takes:
+    bridge_name    string    "Management bridge name"
+    interfaces     string[]  "Physical interfaces for bridge"
+    uplink         string    "Uplink interface"
+    stp_enabled    bool      "Enable STP on management bridge"
+    forward_delay  int       "STP forward delay"
+    bond_name      string    "Bond interface name"
+    bond_mode      string    "Bond mode (e.g. 802.3ad)"
+    bond_members   string[]  "Bond member interfaces"
+    vlans          int[]     "VLAN IDs to provision on the bond"
+
+  steps:
+    1. -> provision_management_bridge
+         bridge_name = {bridge_name}
+         interfaces = {interfaces}
+         uplink = {uplink}
+         stp_enabled = {stp_enabled}
+         forward_delay = {forward_delay}
+
+    2. bond_create
+         bond_name = {bond_name}
+         mode = {bond_mode}
+         members = {bond_members}
+
+    3. for vlan in {vlans}:
+         vlan_create
+           parent = {bond_name}
+           vlan_id = {vlan}
+
+  requires:
+    step 2 needs step 1
+    step 3 needs step 2
+
+  on failure:
+    rollback all

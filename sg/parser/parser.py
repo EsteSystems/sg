@@ -572,8 +572,8 @@ class Parser:
 
                     # Check for "when" conditional
                     if self.peek().type == TokenType.KEYWORD and self.peek().value == "when":
-                        # Future: parse conditional steps
-                        self._skip_to_newline()
+                        step = self._parse_when_step(index)
+                        steps.append(step)
                         continue
 
                     # Check for "->" pathway reference
@@ -661,6 +661,64 @@ class Parser:
             variable=variable,
             iterable=iterable,
             body=body,
+        )
+
+    def _parse_when_step(self, index: int) -> ConditionalStep:
+        """Parse: when step N.field: "value" -> locus ..."""
+        self.expect(TokenType.KEYWORD, "when")
+        self.expect(TokenType.KEYWORD, "step")
+        step_num = int(self.expect(TokenType.NUMBER).value)
+        self.expect(TokenType.DOT)
+        field_name = self.expect(TokenType.IDENTIFIER).value
+
+        if self.peek().type == TokenType.COLON:
+            self.advance()
+
+        self._consume_newline()
+
+        branches: dict[str, ASTPathwayStep] = {}
+        if self.peek().type == TokenType.INDENT:
+            self.advance()
+
+            while not self.at_end() and self.peek().type != TokenType.DEDENT:
+                self.skip_newlines()
+                if self.at_end() or self.peek().type == TokenType.DEDENT:
+                    break
+
+                # Parse branch: "value" -> locus or "value" locus
+                branch_value = ""
+                if self.peek().type == TokenType.STRING:
+                    branch_value = self.advance().value
+                elif self.peek().type == TokenType.IDENTIFIER:
+                    branch_value = self.advance().value
+                else:
+                    self._skip_to_newline()
+                    continue
+
+                # Arrow is a visual connector in when branches, not a pathway ref
+                if self.peek().type == TokenType.ARROW:
+                    self.advance()
+
+                if self.peek().type == TokenType.IDENTIFIER:
+                    locus = self.advance().value
+                    params = self._parse_step_params()
+                    branches[branch_value] = ASTPathwayStep(
+                        index=0,
+                        locus=locus,
+                        is_pathway_ref=False,
+                        params=params,
+                    )
+                else:
+                    self._skip_to_newline()
+
+            if self.peek().type == TokenType.DEDENT:
+                self.advance()
+
+        return ConditionalStep(
+            index=index,
+            condition_step=step_num,
+            condition_field=field_name,
+            branches=branches,
         )
 
     def _parse_step_params(self) -> dict[str, str]:

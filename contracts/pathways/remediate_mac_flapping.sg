@@ -1,0 +1,21 @@
+pathway remediate_mac_flapping
+  risk medium
+
+  does:
+    Detect and remediate MAC address flapping on a bridge. First checks
+    MAC stability, then conditionally remediates by preserving the MAC
+    address with a gratuitous ARP if flapping is detected.
+
+  takes:
+    bridge_name  string  "Bridge to check"
+
+  steps:
+    1. check_mac_stability
+         bridge_name = {bridge_name}
+
+    2. when step 1.healthy:
+         false -> mac_preserve
+           device = {bridge_name}
+
+  on failure:
+    report partial

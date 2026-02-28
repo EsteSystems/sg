@@ -60,7 +60,7 @@ _SINGLE_KEYWORDS = {
     "does", "takes", "gives", "types",
     "before", "after", "verify", "within", "feeds",
     "steps", "requires", "has",
-    "for", "in", "step", "needs",
+    "for", "in", "step", "needs", "when",
 }
 
 # Two-word keywords (first word -> second word)

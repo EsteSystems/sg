@@ -30,6 +30,14 @@ class MutationEngine(ABC):
         """Generate a mutated gene source. Returns Python source code."""
         ...
 
+    def generate(self, locus: str, contract_prompt: str,
+                 count: int = 1) -> list[str]:
+        """Proactively generate competing implementations from a contract.
+
+        Returns a list of Python source code strings (one per variant).
+        """
+        raise NotImplementedError("this engine does not support proactive generation")
+
     def generate_fused(self, pathway_name: str, gene_sources: list[str],
                        loci: list[str]) -> str:
         """Generate a fused gene combining multiple genes into one."""
@@ -47,6 +55,13 @@ class MockMutationEngine(MutationEngine):
         if not fixture_path.exists():
             raise FileNotFoundError(f"no fixture at {fixture_path}")
         return fixture_path.read_text()
+
+    def generate(self, locus: str, contract_prompt: str,
+                 count: int = 1) -> list[str]:
+        fixture_path = self.fixtures_dir / f"{locus}_fix.py"
+        if not fixture_path.exists():
+            raise FileNotFoundError(f"no generation fixture at {fixture_path}")
+        return [fixture_path.read_text()]
 
     def generate_fused(self, pathway_name: str, gene_sources: list[str],
                        loci: list[str]) -> str:
@@ -157,6 +172,62 @@ Write a fixed version of this gene. The gene must:
 Return ONLY the Python source code in a ```python``` block."""
         text = self._call_api(prompt)
         return self._extract_python(text)
+
+    def generate(self, locus: str, contract_prompt: str,
+                 count: int = 1) -> list[str]:
+        if count == 1:
+            prompt = f"""You are a gene generation engine for the Software Genomics runtime.
+
+A gene is a Python function that takes a JSON string and returns a JSON string.
+The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
+
+## Contract
+{contract_prompt}
+
+## Task
+Write a Python implementation of this gene. The gene must:
+1. Define an `execute(input_json: str) -> str` function
+2. Use `gene_sdk` for kernel operations (create_bridge, set_stp, get_device_mac, etc.)
+3. Parse input with `json.loads(input_json)`
+4. Return valid JSON (via `json.dumps()`) with at least a "success" boolean field
+5. Handle all failure modes described in the contract
+
+Return ONLY the Python source code in a ```python``` block."""
+        else:
+            prompt = f"""You are a gene generation engine for the Software Genomics runtime.
+
+A gene is a Python function that takes a JSON string and returns a JSON string.
+The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
+
+## Contract
+{contract_prompt}
+
+## Task
+Write {count} DIFFERENT implementations of this gene, each using a different approach
+or strategy. Each implementation must:
+1. Define an `execute(input_json: str) -> str` function
+2. Use `gene_sdk` for kernel operations (create_bridge, set_stp, get_device_mac, etc.)
+3. Parse input with `json.loads(input_json)`
+4. Return valid JSON (via `json.dumps()`) with at least a "success" boolean field
+5. Handle all failure modes described in the contract
+
+Separate each implementation with a line containing only: ---VARIANT---
+
+Return ONLY Python source code in ```python``` blocks, separated by ---VARIANT---."""
+
+        text = self._call_api(prompt)
+
+        if count == 1:
+            return [self._extract_python(text)]
+
+        # Split on variant separator
+        variants = []
+        for chunk in re.split(r"---VARIANT---", text):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            variants.append(self._extract_python(chunk))
+        return variants if variants else [self._extract_python(text)]
 
     def generate_fused(self, pathway_name: str, gene_sources: list[str],
                        loci: list[str]) -> str:

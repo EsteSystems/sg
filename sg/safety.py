@@ -233,7 +233,9 @@ def requires_transaction(risk: BlastRadius) -> bool:
                     BlastRadius.HIGH, BlastRadius.CRITICAL)
 
 
+SHADOW_PROMOTION_THRESHOLD = 3
+
+
 def is_shadow_only(risk: BlastRadius) -> bool:
-    """Return True if blast radius requires shadow mode (stub — always False for now)."""
-    # Future: HIGH and CRITICAL could default to shadow mode
-    return False
+    """Return True if blast radius requires shadow execution before live."""
+    return risk in (BlastRadius.HIGH, BlastRadius.CRITICAL)

@@ -211,10 +211,12 @@ class TestBlastRadius:
     def test_critical_requires_transaction(self):
         assert requires_transaction(BlastRadius.CRITICAL)
 
-    def test_shadow_mode_stub(self):
-        # Currently always False — shadow mode is a stub
+    def test_shadow_mode(self):
         assert not is_shadow_only(BlastRadius.NONE)
-        assert not is_shadow_only(BlastRadius.HIGH)
+        assert not is_shadow_only(BlastRadius.LOW)
+        assert not is_shadow_only(BlastRadius.MEDIUM)
+        assert is_shadow_only(BlastRadius.HIGH)
+        assert is_shadow_only(BlastRadius.CRITICAL)
 
 
 # --- Orchestrator integration ---

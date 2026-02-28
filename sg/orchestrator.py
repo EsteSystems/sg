@@ -18,7 +18,7 @@ from sg.parser.types import BlastRadius
 from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contract
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
-from sg.safety import Transaction, SafeKernel, requires_transaction
+from sg.safety import Transaction, SafeKernel, requires_transaction, is_shadow_only, SHADOW_PROMOTION_THRESHOLD
 from sg.verify import VerifyScheduler, parse_duration
 
 
@@ -44,6 +44,7 @@ class Orchestrator:
         self.contract_store = contract_store
         self.project_root = project_root
         self.verify_scheduler = VerifyScheduler()
+        self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
 
     def _get_risk(self, locus: str) -> BlastRadius:
         """Get the blast radius for a locus from its contract."""
@@ -63,6 +64,7 @@ class Orchestrator:
         last_error = ""
         risk = self._get_risk(locus)
         use_txn = requires_transaction(risk)
+        use_shadow = is_shadow_only(risk)
 
         for sha in stack:
             source = self.registry.load_source(sha)
@@ -71,6 +73,16 @@ class Orchestrator:
 
             allele = self.registry.get(sha)
             if allele is None:
+                continue
+
+            # Shadow mode: HIGH/CRITICAL risk alleles must accumulate shadow
+            # successes against a mock kernel before live execution is allowed.
+            if use_shadow and allele.shadow_successes < SHADOW_PROMOTION_THRESHOLD:
+                result = self._try_shadow_execution(
+                    locus, sha, source, allele, input_json
+                )
+                if result is not None:
+                    return result
                 continue
 
             txn = Transaction(locus, risk) if use_txn else None
@@ -208,10 +220,10 @@ class Orchestrator:
         if not isinstance(healthy, bool):
             return
 
-        # Determine timescale from feeds declarations
+        # Determine timescale from feeds declarations (or override)
         for feed in gene_contract.feeds:
             target_locus = feed.target_locus
-            timescale = feed.timescale
+            timescale = self.feedback_timescale or feed.timescale
 
             # Find the dominant allele at the target config locus
             dominant_sha = self.phenotype.get_dominant(target_locus)
@@ -249,6 +261,41 @@ class Orchestrator:
         self.verify_scheduler.schedule(
             gene_contract.verify, delay, input_json, self
         )
+
+    def _try_shadow_execution(
+        self, locus: str, sha: str, source: str,
+        allele: object, input_json: str,
+    ) -> tuple[str, str] | None:
+        """Run a gene against a mock kernel (shadow mode).
+
+        Shadow results are returned to the caller but the real kernel
+        is untouched. Accumulates shadow_successes on the allele; once
+        the threshold is met, subsequent calls use the real kernel.
+        """
+        from sg.kernel.mock import MockNetworkKernel
+
+        shadow_kernel = MockNetworkKernel()
+        try:
+            execute_fn = load_gene(source, shadow_kernel)
+            result = call_gene(execute_fn, input_json)
+
+            if not validate_output(locus, result):
+                raise RuntimeError(f"shadow output validation failed for {locus}")
+
+            allele.shadow_successes += 1
+            remaining = SHADOW_PROMOTION_THRESHOLD - allele.shadow_successes
+            if remaining > 0:
+                print(f"  [{locus}] shadow success via {sha[:12]} "
+                      f"({allele.shadow_successes}/{SHADOW_PROMOTION_THRESHOLD})")
+            else:
+                print(f"  [{locus}] shadow threshold met for {sha[:12]} "
+                      f"— eligible for live execution")
+            return (result, sha)
+
+        except Exception as e:
+            allele.shadow_successes = 0  # reset on failure
+            print(f"  [{locus}] shadow failed via {sha[:12]}: {e}")
+            return None
 
     def _check_demotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)

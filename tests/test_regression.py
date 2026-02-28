@@ -101,6 +101,48 @@ class TestRegressionDetector:
         assert result is None
 
 
+class TestRegressionPersistence:
+    def test_save_and_load(self, tmp_path):
+        """RegressionDetector round-trips through JSON."""
+        det = RegressionDetector()
+        allele = AlleleMetadata(sha256="abc", locus="test",
+                                successful_invocations=10, failed_invocations=0)
+        det.record(allele)
+
+        path = tmp_path / "regression.json"
+        det.save(path)
+        assert path.exists()
+
+        det2 = RegressionDetector.open(path)
+        h = det2.get_history("abc")
+        assert h is not None
+        assert h.peak_fitness == 1.0
+        assert h.samples == 1
+
+    def test_open_missing_file(self, tmp_path):
+        """RegressionDetector.open on missing file starts empty."""
+        det = RegressionDetector.open(tmp_path / "nonexistent.json")
+        assert det.history == {}
+
+    def test_persistence_across_sessions(self, tmp_path):
+        """Peak fitness persists, regression detected in later session."""
+        path = tmp_path / "regression.json"
+
+        # Session 1: record high fitness
+        det1 = RegressionDetector()
+        allele = AlleleMetadata(sha256="abc", locus="test",
+                                successful_invocations=10, failed_invocations=0)
+        det1.record(allele)
+        det1.save(path)
+
+        # Session 2: load state, fitness has dropped
+        det2 = RegressionDetector.open(path)
+        allele.failed_invocations = 5
+        result = det2.record(allele)
+        # 10/15 = 0.67, drop = 0.33 from peak 1.0 → mild
+        assert result == "mild"
+
+
 class TestRegressionIntegration:
     @pytest.fixture
     def project(self, tmp_path):
@@ -163,5 +205,35 @@ class TestRegressionIntegration:
 
         dominant_sha = phenotype.get_dominant("bridge_create")
         h = orch.regression_detector.get_history(dominant_sha)
+        assert h is not None
+        assert h.samples == 1
+
+    def test_regression_state_persisted_to_disk(self, project):
+        """After execute_locus, regression state is saved to .sg/regression.json."""
+        cs = ContractStore.open(project / "contracts")
+        registry = Registry.open(project / ".sg" / "registry")
+        phenotype = PhenotypeMap.load(project / "phenotype.toml")
+        ft = FusionTracker.open(project / "fusion_tracker.json")
+        kernel = MockNetworkKernel()
+        mutation_engine = MockMutationEngine(project / "fixtures")
+
+        orch = Orchestrator(
+            registry=registry, phenotype=phenotype,
+            mutation_engine=mutation_engine, fusion_tracker=ft,
+            kernel=kernel, contract_store=cs, project_root=project,
+        )
+
+        orch.execute_locus("bridge_create", json.dumps({
+            "bridge_name": "br0", "interfaces": ["eth0"],
+        }))
+
+        # Regression state should be saved to disk
+        regression_path = project / ".sg" / "regression.json"
+        assert regression_path.exists()
+
+        # Loading a fresh detector should recover the state
+        det2 = RegressionDetector.open(regression_path)
+        dominant_sha = phenotype.get_dominant("bridge_create")
+        h = det2.get_history(dominant_sha)
         assert h is not None
         assert h.samples == 1

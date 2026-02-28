@@ -45,7 +45,8 @@ class Orchestrator:
         self.contract_store = contract_store
         self.project_root = project_root
         self.verify_scheduler = VerifyScheduler()
-        self.regression_detector = RegressionDetector()
+        self._regression_path = project_root / ".sg" / "regression.json"
+        self.regression_detector = RegressionDetector.open(self._regression_path)
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
 
     def _get_risk(self, locus: str) -> BlastRadius:
@@ -312,6 +313,7 @@ class Orchestrator:
         if allele is None:
             return
         severity = self.regression_detector.record(allele)
+        self.regression_detector.save(self._regression_path)
         if severity == "severe":
             arena.set_deprecated(allele)
             print(f"  [regression] severe regression for {sha[:12]}, demoting")

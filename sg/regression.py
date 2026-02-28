@@ -5,7 +5,10 @@ below peak, triggers proactive mutation (generates a competing allele).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, asdict
+from pathlib import Path
+
 from sg.registry import AlleleMetadata
 from sg import arena
 
@@ -22,12 +25,19 @@ class FitnessHistory:
     last_fitness: float = 0.0
     samples: int = 0
 
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> FitnessHistory:
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
 
 class RegressionDetector:
     """Monitors allele fitness for regressions.
 
     Returns severity when current fitness drops significantly below
-    the allele's historical peak.
+    the allele's historical peak. JSON-persisted.
     """
 
     def __init__(self, threshold: float = REGRESSION_THRESHOLD) -> None:
@@ -65,3 +75,24 @@ class RegressionDetector:
 
     def get_history(self, sha: str) -> FitnessHistory | None:
         return self.history.get(sha)
+
+    def save(self, path: Path) -> None:
+        """Persist regression history to JSON."""
+        data = {sha: h.to_dict() for sha, h in self.history.items()}
+        path.write_text(json.dumps(data, indent=2))
+
+    def load(self, path: Path) -> None:
+        """Load regression history from JSON."""
+        if path.exists():
+            data = json.loads(path.read_text())
+            self.history = {
+                sha: FitnessHistory.from_dict(h)
+                for sha, h in data.items()
+            }
+
+    @classmethod
+    def open(cls, path: Path, threshold: float = REGRESSION_THRESHOLD) -> RegressionDetector:
+        """Create a RegressionDetector and load state from disk."""
+        det = cls(threshold=threshold)
+        det.load(path)
+        return det

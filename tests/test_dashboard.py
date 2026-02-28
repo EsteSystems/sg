@@ -141,6 +141,31 @@ class TestAlleleSource:
         assert resp.status_code == 404
 
 
+class TestLineageEndpoint:
+    def test_lineage_returns_chain(self, client, dashboard_project):
+        """GET /api/lineage/{sha} returns the lineage chain."""
+        registry = Registry.open(dashboard_project / ".sg" / "registry")
+        sha = list(registry.alleles.keys())[0]
+
+        resp = client.get(f"/api/lineage/{sha[:12]}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "lineage" in data
+        assert len(data["lineage"]) >= 1
+        assert data["lineage"][0]["sha"] == sha[:12]
+        assert "generation" in data["lineage"][0]
+        assert "fitness" in data["lineage"][0]
+
+
+class TestRegressionEndpoint:
+    def test_regression_empty(self, client):
+        """GET /api/regression returns empty when no data."""
+        resp = client.get("/api/regression")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "history" in data
+
+
 class TestDashboardHTML:
     def test_html_serves(self, client):
         """GET / returns HTML page."""
@@ -171,6 +196,17 @@ class TestFederationEndpoints:
         assert "alleles" in data
         assert len(data["alleles"]) >= 1
         assert "source" in data["alleles"][0]
+
+    def test_receive_rejects_tampered(self, client):
+        """POST /api/federation/receive rejects allele with bad source_sha256."""
+        from sg.federation import compute_source_sha
+        resp = client.post("/api/federation/receive", json={
+            "source": "def execute(i): return 'evil'",
+            "source_sha256": compute_source_sha("def execute(i): return 'good'"),
+            "locus": "bridge_create",
+        })
+        assert resp.status_code == 400
+        assert "integrity" in resp.json()["error"]
 
     def test_federation_round_trip(self, client, dashboard_project):
         """Pull alleles from one project, push to same — full HTTP round-trip."""

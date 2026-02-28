@@ -171,3 +171,27 @@ class TestFederationEndpoints:
         assert "alleles" in data
         assert len(data["alleles"]) >= 1
         assert "source" in data["alleles"][0]
+
+    def test_federation_round_trip(self, client, dashboard_project):
+        """Pull alleles from one project, push to same — full HTTP round-trip."""
+        # Pull alleles for bridge_create
+        resp = client.get("/api/federation/alleles/bridge_create")
+        assert resp.status_code == 200
+        alleles = resp.json()["alleles"]
+        assert len(alleles) >= 1
+
+        # Modify source slightly and push back as a "foreign" allele
+        foreign = alleles[0].copy()
+        foreign["source"] = foreign["source"] + "\n# imported from peer"
+        foreign["generation"] = foreign.get("generation", 0) + 1
+
+        resp = client.post("/api/federation/receive", json=foreign)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        new_sha = data["sha"]
+
+        # Verify the new allele shows up in the alleles list
+        resp = client.get("/api/federation/alleles/bridge_create")
+        shas = [a["sha256"][:12] for a in resp.json()["alleles"]]
+        assert new_sha in shas

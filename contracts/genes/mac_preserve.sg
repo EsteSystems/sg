@@ -29,3 +29,7 @@ gene mac_preserve
   fails when:
     - device does not exist -> success=false
     - invalid MAC format -> success=false
+
+  verify:
+    check_link_state interface={device}
+    within 30s

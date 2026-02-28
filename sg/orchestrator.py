@@ -19,6 +19,7 @@ from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contr
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 from sg.safety import Transaction, SafeKernel, requires_transaction
+from sg.verify import VerifyScheduler, parse_duration
 
 
 MAX_MUTATION_RETRIES = 3
@@ -42,6 +43,7 @@ class Orchestrator:
         self.kernel = kernel
         self.contract_store = contract_store
         self.project_root = project_root
+        self.verify_scheduler = VerifyScheduler()
 
     def _get_risk(self, locus: str) -> BlastRadius:
         """Get the blast radius for a locus from its contract."""
@@ -85,6 +87,7 @@ class Orchestrator:
                     txn.commit()
                 arena.record_success(allele)
                 self._process_diagnostic_feedback(locus, result)
+                self._schedule_verify(locus, input_json)
                 self._check_promotion(locus, sha)
                 print(f"  [{locus}] success via {sha[:12]} "
                       f"(fitness: {arena.compute_fitness(allele):.2f})")
@@ -223,6 +226,29 @@ class Orchestrator:
             print(f"  [feedback] {locus} → {target_locus} "
                   f"({timescale}: {'healthy' if healthy else 'unhealthy'}, "
                   f"fitness: {fitness:.2f})")
+
+    def _schedule_verify(self, locus: str, input_json: str) -> None:
+        """Schedule verify diagnostics if the locus contract declares a verify block."""
+        from sg.parser.types import GeneFamily
+
+        gene_contract = self.contract_store.get_gene(locus)
+        if gene_contract is None:
+            return
+        if gene_contract.family != GeneFamily.CONFIGURATION:
+            return
+        if not gene_contract.verify:
+            return
+
+        delay = 0.0
+        if gene_contract.verify_within:
+            try:
+                delay = parse_duration(gene_contract.verify_within)
+            except ValueError:
+                return
+
+        self.verify_scheduler.schedule(
+            gene_contract.verify, delay, input_json, self
+        )
 
     def _check_demotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)

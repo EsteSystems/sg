@@ -29,3 +29,7 @@ gene bond_create
     - bond already exists -> success=false
     - member interface not found -> success=false
     - invalid bonding mode -> success=false
+
+  verify:
+    check_bond_state bond_name={bond_name}
+    within 30s

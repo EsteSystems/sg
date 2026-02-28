@@ -33,3 +33,7 @@ gene bridge_create
     - bridge already exists -> success=false
     - interface not found -> success=false
     - NM D-Bus unavailable -> error
+
+  verify:
+    check_connectivity bridge_name={bridge_name}
+    within 30s

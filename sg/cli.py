@@ -128,6 +128,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
+        orch.verify_scheduler.wait()
         orch.save_state()
 
     for i, output in enumerate(outputs):

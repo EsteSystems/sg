@@ -27,3 +27,7 @@ gene bridge_uplink
     - bridge does not exist -> success=false
     - uplink interface not found -> success=false
     - uplink already enslaved -> success=false
+
+  verify:
+    check_link_state interface={uplink}
+    within 30s

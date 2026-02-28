@@ -29,5 +29,5 @@ gene bridge_stp
     - forward_delay out of range -> success=false
 
   verify:
-    check_link_state device={bridge_name}
+    check_link_state interface={bridge_name}
     within 30s

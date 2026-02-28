@@ -14,9 +14,11 @@ from sg.fusion import FusionTracker
 from sg.kernel.base import NetworkKernel
 from sg.loader import load_gene, call_gene
 from sg.mutation import MutationEngine, MutationContext
+from sg.parser.types import BlastRadius
 from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contract
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
+from sg.safety import Transaction, SafeKernel, requires_transaction
 
 
 MAX_MUTATION_RETRIES = 3
@@ -41,14 +43,24 @@ class Orchestrator:
         self.contract_store = contract_store
         self.project_root = project_root
 
+    def _get_risk(self, locus: str) -> BlastRadius:
+        """Get the blast radius for a locus from its contract."""
+        gene_contract = self.contract_store.get_gene(locus)
+        if gene_contract is not None:
+            return gene_contract.risk
+        return BlastRadius.LOW  # default: wrap in transaction
+
     def execute_locus(self, locus: str, input_json: str) -> tuple[str, str] | None:
         """Execute a locus with the allele stack.
 
         Returns (output_json, used_sha) on success, or None if all exhausted.
-        Triggers mutation on exhaustion.
+        Triggers mutation on exhaustion. Wraps each allele attempt in a
+        transaction — on failure, all kernel mutations are rolled back.
         """
         stack = self.phenotype.get_stack(locus)
         last_error = ""
+        risk = self._get_risk(locus)
+        use_txn = requires_transaction(risk)
 
         for sha in stack:
             source = self.registry.load_source(sha)
@@ -59,13 +71,18 @@ class Orchestrator:
             if allele is None:
                 continue
 
+            txn = Transaction(locus, risk) if use_txn else None
+            kernel = SafeKernel(self.kernel, txn) if txn else self.kernel
+
             try:
-                execute_fn = load_gene(source, self.kernel)
+                execute_fn = load_gene(source, kernel)
                 result = call_gene(execute_fn, input_json)
 
                 if not validate_output(locus, result):
                     raise RuntimeError(f"output validation failed for {locus}")
 
+                if txn:
+                    txn.commit()
                 arena.record_success(allele)
                 self._process_diagnostic_feedback(locus, result)
                 self._check_promotion(locus, sha)
@@ -74,6 +91,10 @@ class Orchestrator:
                 return (result, sha)
 
             except Exception as e:
+                if txn and txn.action_count > 0:
+                    rolled = txn.rollback()
+                    if rolled:
+                        print(f"  [{locus}] rolled back {len(rolled)} action(s)")
                 last_error = str(e)
                 arena.record_failure(allele)
                 self._check_demotion(locus, sha)
@@ -102,6 +123,9 @@ class Orchestrator:
             error_message=error,
         )
 
+        risk = self._get_risk(locus)
+        use_txn = requires_transaction(risk)
+
         for attempt in range(MAX_MUTATION_RETRIES):
             try:
                 new_source = self.mutation_engine.mutate(ctx)
@@ -119,13 +143,18 @@ class Orchestrator:
             new_sha = self.registry.register(new_source, locus, gen, parent_sha)
             self.phenotype.add_to_fallback(locus, new_sha)
 
+            txn = Transaction(locus, risk) if use_txn else None
+            kernel = SafeKernel(self.kernel, txn) if txn else self.kernel
+
             try:
-                execute_fn = load_gene(new_source, self.kernel)
+                execute_fn = load_gene(new_source, kernel)
                 result = call_gene(execute_fn, input_json)
 
                 if not validate_output(locus, result):
                     raise RuntimeError("output validation failed")
 
+                if txn:
+                    txn.commit()
                 allele = self.registry.get(new_sha)
                 if allele:
                     arena.record_success(allele)
@@ -133,6 +162,10 @@ class Orchestrator:
                 return (result, new_sha)
 
             except Exception as e:
+                if txn and txn.action_count > 0:
+                    rolled = txn.rollback()
+                    if rolled:
+                        print(f"  [mutation] rolled back {len(rolled)} action(s)")
                 allele = self.registry.get(new_sha)
                 if allele:
                     arena.record_failure(allele)
@@ -198,25 +231,63 @@ class Orchestrator:
             print(f"  [arena] demoted {sha[:12]} for {locus} (3 consecutive failures)")
 
     def run_pathway(self, pathway_name: str, input_json: str) -> list[str]:
-        """Execute a named pathway."""
-        # Try to load pathway from contract store
+        """Execute a named pathway.
+
+        Handles on_failure strategy from the pathway contract:
+        - "rollback all": clean up all tracked resources on failure
+        - "report partial": let partial results stand
+        """
         pathway_contract = self.contract_store.get_pathway(pathway_name)
         if pathway_contract is not None:
             pathway = pathway_from_contract(pathway_contract)
+            on_failure = pathway_contract.on_failure
         else:
             raise ValueError(f"unknown pathway: {pathway_name}")
 
         print(f"Executing pathway: {pathway_name}")
 
-        outputs = execute_pathway(
-            pathway, input_json, self,
-            self.fusion_tracker, self.registry,
-            self.phenotype, self.mutation_engine,
-            self.kernel,
-        )
+        # Snapshot tracked resources before pathway starts
+        resources_before = set(self.kernel.tracked_resources())
+
+        try:
+            outputs = execute_pathway(
+                pathway, input_json, self,
+                self.fusion_tracker, self.registry,
+                self.phenotype, self.mutation_engine,
+                self.kernel,
+            )
+        except RuntimeError:
+            if on_failure == "rollback all":
+                self._rollback_pathway_resources(resources_before)
+            raise
 
         print(f"Pathway '{pathway_name}' completed with {len(outputs)} output(s)")
         return outputs
+
+    def _rollback_pathway_resources(
+        self, resources_before: set[tuple[str, str]]
+    ) -> None:
+        """Clean up resources created during a failed pathway."""
+        current = set(self.kernel.tracked_resources())
+        new_resources = current - resources_before
+        if not new_resources:
+            return
+
+        print(f"  [safety] rolling back {len(new_resources)} resource(s)...")
+        for resource_type, name in new_resources:
+            try:
+                if resource_type == "bridge":
+                    self.kernel.delete_bridge(name)
+                elif resource_type == "bond":
+                    self.kernel.delete_bond(name)
+                elif resource_type == "vlan":
+                    parts = name.split(".", 1)
+                    if len(parts) == 2:
+                        self.kernel.delete_vlan(parts[0], int(parts[1]))
+                self.kernel.untrack_resource(resource_type, name)
+                print(f"  [safety] cleaned up {resource_type} '{name}'")
+            except Exception as e:
+                print(f"  [safety] cleanup failed for {resource_type} '{name}': {e}")
 
     def save_state(self) -> None:
         self.registry.save_index()

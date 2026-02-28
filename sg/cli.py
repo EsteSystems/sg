@@ -145,9 +145,28 @@ def cmd_init(args: argparse.Namespace) -> None:
     print("Genome initialized.")
 
 
+def _inject_broken_genes(orch: Orchestrator) -> None:
+    """Replace dominant alleles with broken versions to force mutation."""
+    broken = (
+        'import json\n'
+        'def execute(input_json):\n'
+        '    raise RuntimeError("force-mutate: intentional failure")\n'
+    )
+    for locus in list(orch.phenotype.loci.keys()):
+        sha = orch.registry.register(broken, locus, generation=0)
+        orch.phenotype.promote(locus, sha)
+        allele = orch.registry.get(sha)
+        if allele:
+            allele.state = "dominant"
+    print("Force-mutate: replaced all dominant alleles with broken versions")
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """Execute a pathway."""
     orch = make_orchestrator(args)
+
+    if getattr(args, "force_mutate", False):
+        _inject_broken_genes(orch)
 
     try:
         outputs = orch.run_pathway(args.pathway, args.input)
@@ -355,6 +374,8 @@ def main() -> None:
     run_parser = subparsers.add_parser("run", help="execute a pathway")
     run_parser.add_argument("pathway", help="pathway name")
     run_parser.add_argument("--input", required=True, help="input JSON string")
+    run_parser.add_argument("--force-mutate", action="store_true",
+                            help="replace all dominant alleles with broken versions to force mutation")
 
     gen_parser = subparsers.add_parser("generate", help="proactively generate competing alleles")
     gen_parser.add_argument("locus", nargs="?", help="locus to generate for")

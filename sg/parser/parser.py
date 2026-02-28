@@ -531,7 +531,7 @@ class Parser:
 
                 if self.peek().type == TokenType.IDENTIFIER:
                     target = self.advance().value
-                    timescale = "immediate"
+                    timescale = "convergence"
                     if self.peek().type == TokenType.IDENTIFIER:
                         timescale = self.advance().value
                     feeds.append(FeedsDef(target_locus=target, timescale=timescale))

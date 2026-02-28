@@ -4,10 +4,12 @@ execute → validate → score → fallback → mutate → register → retry
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from sg import arena
 from sg.contracts import ContractStore, validate_output
+from sg.fitness import record_feedback
 from sg.fusion import FusionTracker
 from sg.kernel.base import NetworkKernel
 from sg.loader import load_gene, call_gene
@@ -65,6 +67,7 @@ class Orchestrator:
                     raise RuntimeError(f"output validation failed for {locus}")
 
                 arena.record_success(allele)
+                self._process_diagnostic_feedback(locus, result)
                 self._check_promotion(locus, sha)
                 print(f"  [{locus}] success via {sha[:12]} "
                       f"(fitness: {arena.compute_fitness(allele):.2f})")
@@ -150,6 +153,43 @@ class Orchestrator:
                 arena.set_recessive(dominant)
             self.phenotype.promote(locus, sha)
             print(f"  [arena] promoted {sha[:12]} to dominant for {locus}")
+
+    def _process_diagnostic_feedback(self, locus: str, output_json: str) -> None:
+        """If this locus is a diagnostic gene with feeds, feed results back."""
+        gene_contract = self.contract_store.get_gene(locus)
+        if gene_contract is None:
+            return
+        if not gene_contract.feeds:
+            return
+
+        # Parse the diagnostic output for health status
+        try:
+            data = json.loads(output_json)
+        except (json.JSONDecodeError, TypeError):
+            return
+
+        healthy = data.get("healthy")
+        if not isinstance(healthy, bool):
+            return
+
+        # Determine timescale from feeds declarations
+        for feed in gene_contract.feeds:
+            target_locus = feed.target_locus
+            timescale = feed.timescale
+
+            # Find the dominant allele at the target config locus
+            dominant_sha = self.phenotype.get_dominant(target_locus)
+            if dominant_sha is None:
+                continue
+            target_allele = self.registry.get(dominant_sha)
+            if target_allele is None:
+                continue
+
+            record_feedback(target_allele, timescale, healthy, locus)
+            fitness = arena.compute_fitness(target_allele)
+            print(f"  [feedback] {locus} → {target_locus} "
+                  f"({timescale}: {'healthy' if healthy else 'unhealthy'}, "
+                  f"fitness: {fitness:.2f})")
 
     def _check_demotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)

@@ -30,6 +30,7 @@ class AlleleMetadata:
     failed_invocations: int = 0
     consecutive_failures: int = 0
     created_at: float = field(default_factory=time.time)
+    fitness_records: list[dict] = field(default_factory=list)
 
     @property
     def total_invocations(self) -> int:

@@ -1,6 +1,9 @@
 """Fitness scoring, promotion, and demotion.
 
-Fitness = successful_invocations / max(total_invocations, 10).
+Simple fitness = successful_invocations / max(total_invocations, 10).
+Temporal fitness = weighted (immediate 30%, convergence 50%, resilience 20%).
+Uses temporal fitness when diagnostic feedback records exist.
+
 Promotion: candidate fitness >= dominant + 0.1, with >= 50 invocations.
 Demotion: 3 consecutive failures.
 """
@@ -16,6 +19,10 @@ DEMOTION_CONSECUTIVE_FAILURES = 3
 
 
 def compute_fitness(allele: AlleleMetadata) -> float:
+    """Compute fitness, using temporal scoring when feedback records exist."""
+    if allele.fitness_records:
+        from sg.fitness import compute_temporal_fitness
+        return compute_temporal_fitness(allele)
     total = allele.total_invocations
     if total == 0:
         return 0.0

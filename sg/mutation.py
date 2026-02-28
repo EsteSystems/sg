@@ -1,4 +1,4 @@
-"""Mutation engines — mock (fixtures) and Claude (API).
+"""Mutation engines — mock (fixtures) and LLM (Claude, OpenAI, DeepSeek).
 
 When all alleles are exhausted, the orchestrator triggers mutation:
 an LLM generates a new allele from the contract, failing source,
@@ -71,35 +71,24 @@ class MockMutationEngine(MutationEngine):
         return fixture_path.read_text()
 
 
-class ClaudeMutationEngine(MutationEngine):
-    """Calls the Anthropic API to generate mutations."""
+class LLMMutationEngine(MutationEngine):
+    """Base class for LLM-backed mutation engines.
 
-    def __init__(self, api_key: str, contract_store: ContractStore,
-                 model: str = "claude-sonnet-4-5-20250929"):
-        self.api_key = api_key
+    Handles prompt building, Python extraction, and multi-variant parsing.
+    Subclasses only need to implement _call_api().
+    """
+
+    def __init__(self, contract_store: ContractStore):
         self.contract_store = contract_store
-        self.model = model
 
+    @abstractmethod
     def _call_api(self, prompt: str) -> str:
-        import httpx
+        """Send a prompt to the LLM and return the response text."""
+        ...
 
-        resp = httpx.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "max_tokens": 4096,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["content"][0]["text"]
+    @property
+    def provider_name(self) -> str:
+        return "llm"
 
     def _extract_python(self, text: str) -> str:
         match = re.search(r"```python\s*\n(.*?)```", text, re.DOTALL)
@@ -256,3 +245,93 @@ away intermediate JSON serialization where possible. The gene must:
 Return ONLY the Python source code in a ```python``` block."""
         text = self._call_api(prompt)
         return self._extract_python(text)
+
+
+class ClaudeMutationEngine(LLMMutationEngine):
+    """Calls the Anthropic API to generate mutations."""
+
+    def __init__(self, api_key: str, contract_store: ContractStore,
+                 model: str = "claude-sonnet-4-5-20250929"):
+        super().__init__(contract_store)
+        self.api_key = api_key
+        self.model = model
+
+    @property
+    def provider_name(self) -> str:
+        return "claude"
+
+    def _call_api(self, prompt: str) -> str:
+        import httpx
+
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["content"][0]["text"]
+
+
+class OpenAIMutationEngine(LLMMutationEngine):
+    """Calls the OpenAI-compatible API to generate mutations.
+
+    Works with OpenAI, Azure OpenAI, and any OpenAI-compatible endpoint.
+    """
+
+    DEFAULT_BASE_URL = "https://api.openai.com/v1"
+    DEFAULT_MODEL = "gpt-4o"
+
+    def __init__(self, api_key: str, contract_store: ContractStore,
+                 model: str | None = None, base_url: str | None = None):
+        super().__init__(contract_store)
+        self.api_key = api_key
+        self.model = model or self.DEFAULT_MODEL
+        self.base_url = base_url or self.DEFAULT_BASE_URL
+
+    @property
+    def provider_name(self) -> str:
+        return "openai"
+
+    def _call_api(self, prompt: str) -> str:
+        import httpx
+
+        resp = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
+class DeepSeekMutationEngine(OpenAIMutationEngine):
+    """Calls the DeepSeek API to generate mutations.
+
+    DeepSeek uses the OpenAI-compatible API format with a different base URL.
+    """
+
+    DEFAULT_BASE_URL = "https://api.deepseek.com"
+    DEFAULT_MODEL = "deepseek-chat"
+
+    @property
+    def provider_name(self) -> str:
+        return "deepseek"

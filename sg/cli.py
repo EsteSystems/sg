@@ -17,6 +17,8 @@ from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
+MUTATION_ENGINE_CHOICES = ["auto", "mock", "claude", "openai", "deepseek"]
+
 
 def get_project_root() -> Path:
     return Path(os.environ.get("SG_PROJECT_ROOT", ".")).resolve()
@@ -31,6 +33,7 @@ def make_mutation_engine(
     args: argparse.Namespace, project_root: Path, contract_store: ContractStore
 ) -> MutationEngine:
     engine = getattr(args, "mutation_engine", "auto")
+    model = getattr(args, "model", None)
 
     if engine == "mock":
         return MockMutationEngine(project_root / "fixtures")
@@ -41,13 +44,36 @@ def make_mutation_engine(
             print("error: --mutation-engine=claude requires ANTHROPIC_API_KEY", file=sys.stderr)
             sys.exit(1)
         from sg.mutation import ClaudeMutationEngine
-        return ClaudeMutationEngine(api_key, contract_store)
+        return ClaudeMutationEngine(api_key, contract_store, **({"model": model} if model else {}))
 
-    # auto: try Claude, fall back to mock
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if api_key:
-        from sg.mutation import ClaudeMutationEngine
-        return ClaudeMutationEngine(api_key, contract_store)
+    if engine == "openai":
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            print("error: --mutation-engine=openai requires OPENAI_API_KEY", file=sys.stderr)
+            sys.exit(1)
+        from sg.mutation import OpenAIMutationEngine
+        return OpenAIMutationEngine(api_key, contract_store, **({"model": model} if model else {}))
+
+    if engine == "deepseek":
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            print("error: --mutation-engine=deepseek requires DEEPSEEK_API_KEY", file=sys.stderr)
+            sys.exit(1)
+        from sg.mutation import DeepSeekMutationEngine
+        return DeepSeekMutationEngine(api_key, contract_store, **({"model": model} if model else {}))
+
+    # auto: try Claude, OpenAI, DeepSeek, fall back to mock
+    for env_var, engine_cls_name in [
+        ("ANTHROPIC_API_KEY", "ClaudeMutationEngine"),
+        ("OPENAI_API_KEY", "OpenAIMutationEngine"),
+        ("DEEPSEEK_API_KEY", "DeepSeekMutationEngine"),
+    ]:
+        api_key = os.environ.get(env_var)
+        if api_key:
+            import sg.mutation as mut
+            engine_cls = getattr(mut, engine_cls_name)
+            return engine_cls(api_key, contract_store, **({"model": model} if model else {}))
+
     return MockMutationEngine(project_root / "fixtures")
 
 
@@ -295,8 +321,10 @@ def cmd_status(args: argparse.Namespace) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="sg", description="Software Genome runtime")
     parser.add_argument("--mutation-engine", default="auto",
-                        choices=["auto", "mock", "claude"],
-                        help="mutation engine to use")
+                        choices=MUTATION_ENGINE_CHOICES,
+                        help="mutation engine to use (auto|mock|claude|openai|deepseek)")
+    parser.add_argument("--model", default=None,
+                        help="override default model for the mutation engine")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="initialize genome from seed genes")

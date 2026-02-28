@@ -97,6 +97,20 @@ def import_allele(registry: Registry, data: dict) -> str:
     return sha
 
 
+def merge_peer_observation(allele: AlleleMetadata, peer_name: str, data: dict) -> None:
+    """Merge a peer's fitness observation into the allele.
+
+    Each observation records the peer's success/failure counts for this allele.
+    """
+    import time as _time
+    allele.peer_observations.append({
+        "peer": peer_name,
+        "successes": data.get("successful_invocations", 0),
+        "failures": max(0, data.get("total_invocations", 0) - data.get("successful_invocations", 0)),
+        "timestamp": _time.time(),
+    })
+
+
 def push_allele(peer: PeerConfig, allele_data: dict) -> bool:
     """Push an allele to a peer. Returns success."""
     try:

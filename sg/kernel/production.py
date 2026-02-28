@@ -9,6 +9,7 @@ Requires: Linux, ip, bridge commands, sysfs, sudo access.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -16,7 +17,9 @@ from sg.kernel.base import NetworkKernel
 
 
 SAFETY_PREFIX = "sg-test-"
-PROTECTED_INTERFACES = {"eth0", "lo"}
+_BASE_PROTECTED = {"eth0", "lo"}
+_extra = os.environ.get("SG_PROTECTED_INTERFACES", "")
+PROTECTED_INTERFACES = _BASE_PROTECTED | {i.strip() for i in _extra.split(",") if i.strip()}
 
 
 class ProductionNetworkKernel(NetworkKernel):

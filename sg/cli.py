@@ -1,4 +1,4 @@
-"""CLI: init, run, status, generate, watch, lineage, compete, deploy, dashboard, evolve, share, pull."""
+"""CLI: init, run, status, generate, watch, lineage, compete, deploy, dashboard, evolve, share, pull, snapshot, rollback, snapshots, diff, test."""
 from __future__ import annotations
 
 import argparse
@@ -505,7 +505,7 @@ def cmd_compete(args: argparse.Namespace) -> None:
 def cmd_completions(args: argparse.Namespace) -> None:
     """Print shell completion script."""
     subcommands = ("init run deploy generate watch status lineage compete "
-                   "dashboard evolve share pull completions")
+                   "dashboard evolve share pull test diff snapshot rollback snapshots completions")
     engines = "auto mock claude openai deepseek"
     kernels = "mock production"
 
@@ -653,6 +653,123 @@ def cmd_pull(args: argparse.Namespace) -> None:
     print(f"Imported {imported} allele(s) for {locus}")
 
 
+def cmd_test(args: argparse.Namespace) -> None:
+    """Run contract conformance tests."""
+    from sg.conformance import ConformanceSuite
+    root = get_project_root()
+    contract_store = load_contract_store(root)
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+    kernel = MockNetworkKernel()
+
+    suite = ConformanceSuite()
+    locus = getattr(args, "locus", None)
+    verbose = getattr(args, "verbose", False)
+
+    if locus:
+        result = suite.run_locus(locus, contract_store, registry, phenotype, kernel)
+        if result is None:
+            print(f"No dominant allele for locus '{locus}'")
+            return
+        results = [result]
+    else:
+        results = suite.run_all(contract_store, registry, phenotype, kernel)
+
+    passed = sum(1 for r in results if r.passed)
+    failed = sum(1 for r in results if not r.passed)
+
+    for r in results:
+        status = "PASS" if r.passed else "FAIL"
+        print(f"  [{status}] {r.locus} ({r.sha})")
+        if verbose or not r.passed:
+            for check in r.checks:
+                marker = "ok" if check.passed else "FAIL"
+                msg = f": {check.message}" if check.message else ""
+                print(f"    [{marker}] {check.name}{msg}")
+
+    print(f"\n{passed} passed, {failed} failed, {len(results)} total")
+
+
+def cmd_diff(args: argparse.Namespace) -> None:
+    """Show diff between current genome and a snapshot."""
+    from sg.snapshot import SnapshotManager
+    from sg.diff import diff_phenotypes, format_diff
+    root = get_project_root()
+    mgr = SnapshotManager(root)
+
+    current_pheno = PhenotypeMap.load(root / "phenotype.toml")
+    current_reg = Registry.open(root / ".sg" / "registry")
+
+    if getattr(args, "a", None) and getattr(args, "b", None):
+        # Diff two snapshots
+        snap_a = mgr._snapshot_dir(args.a)
+        snap_b = mgr._snapshot_dir(args.b)
+        old_pheno = PhenotypeMap.load(snap_a / "phenotype.toml")
+        new_pheno = PhenotypeMap.load(snap_b / "phenotype.toml")
+        old_reg = Registry.open(snap_a / "registry")
+        new_reg = Registry.open(snap_b / "registry")
+        print(f"Diff: {args.a} -> {args.b}")
+    else:
+        snap_name = getattr(args, "snapshot", None)
+        if snap_name is None:
+            # Use most recent snapshot
+            snapshots = mgr.list_snapshots()
+            if not snapshots:
+                print("No snapshots found. Create one with: sg snapshot")
+                return
+            snap_name = snapshots[0].name
+        snap_dir = mgr._snapshot_dir(snap_name)
+        if not snap_dir.exists():
+            print(f"Snapshot '{snap_name}' not found.")
+            return
+        old_pheno = PhenotypeMap.load(snap_dir / "phenotype.toml")
+        old_reg = Registry.open(snap_dir / "registry")
+        new_pheno = current_pheno
+        new_reg = current_reg
+        print(f"Diff: {snap_name} -> current")
+
+    diff = diff_phenotypes(old_pheno, new_pheno, old_reg, new_reg)
+    print(format_diff(diff))
+
+
+def cmd_snapshot(args: argparse.Namespace) -> None:
+    """Create a genome snapshot."""
+    from sg.snapshot import SnapshotManager
+    root = get_project_root()
+    mgr = SnapshotManager(root)
+    name = getattr(args, "name", None)
+    description = getattr(args, "description", "")
+    meta = mgr.create(name=name, description=description)
+    print(f"Snapshot created: {meta.name}")
+    print(f"  Alleles: {meta.allele_count}, Loci: {meta.loci_count}")
+
+
+def cmd_rollback(args: argparse.Namespace) -> None:
+    """Restore genome from a snapshot."""
+    from sg.snapshot import SnapshotManager
+    root = get_project_root()
+    mgr = SnapshotManager(root)
+    mgr.restore(args.name)
+    print(f"Restored genome from snapshot: {args.name}")
+
+
+def cmd_snapshots(args: argparse.Namespace) -> None:
+    """List all genome snapshots."""
+    from sg.snapshot import SnapshotManager
+    import datetime
+    root = get_project_root()
+    mgr = SnapshotManager(root)
+    snapshots = mgr.list_snapshots()
+    if not snapshots:
+        print("No snapshots found.")
+        return
+    print(f"{'Name':<30} {'Date':<20} {'Alleles':<10} {'Loci':<8} Description")
+    print("-" * 90)
+    for s in snapshots:
+        dt = datetime.datetime.fromtimestamp(s.timestamp).strftime("%Y-%m-%d %H:%M")
+        print(f"{s.name:<30} {dt:<20} {s.allele_count:<10} {s.loci_count:<8} {s.description}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="sg", description="Software Genome runtime")
     parser.add_argument("--version", action="version", version=f"sg {__version__}")
@@ -717,6 +834,24 @@ def main() -> None:
     pull_parser.add_argument("locus", help="locus to pull")
     pull_parser.add_argument("--peer", help="specific peer URL (default: all peers)")
 
+    test_parser = subparsers.add_parser("test", help="run contract conformance tests")
+    test_parser.add_argument("locus", nargs="?", help="specific locus to test")
+    test_parser.add_argument("--verbose", "-v", action="store_true", help="show all check details")
+
+    diff_parser = subparsers.add_parser("diff", help="compare genome states")
+    diff_parser.add_argument("--snapshot", help="compare current to this snapshot")
+    diff_parser.add_argument("--a", help="first snapshot (with --b)")
+    diff_parser.add_argument("--b", help="second snapshot (with --a)")
+
+    snap_parser = subparsers.add_parser("snapshot", help="create a genome snapshot")
+    snap_parser.add_argument("--name", help="snapshot name (auto-generated if omitted)")
+    snap_parser.add_argument("--description", default="", help="snapshot description")
+
+    rollback_parser = subparsers.add_parser("rollback", help="restore genome from snapshot")
+    rollback_parser.add_argument("name", help="snapshot name to restore")
+
+    subparsers.add_parser("snapshots", help="list all genome snapshots")
+
     comp_parser = subparsers.add_parser("completions", help="generate shell completions")
     comp_parser.add_argument("shell", choices=["bash", "zsh", "fish"],
                              help="shell type")
@@ -749,5 +884,15 @@ def main() -> None:
         cmd_share(args)
     elif args.command == "pull":
         cmd_pull(args)
+    elif args.command == "test":
+        cmd_test(args)
+    elif args.command == "diff":
+        cmd_diff(args)
+    elif args.command == "snapshot":
+        cmd_snapshot(args)
+    elif args.command == "rollback":
+        cmd_rollback(args)
+    elif args.command == "snapshots":
+        cmd_snapshots(args)
     elif args.command == "completions":
         cmd_completions(args)

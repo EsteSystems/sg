@@ -30,6 +30,24 @@ def compute_fitness(allele: AlleleMetadata) -> float:
     return allele.successful_invocations / denominator
 
 
+def compute_distributed_fitness(allele: AlleleMetadata) -> float:
+    """Fitness incorporating peer observations (70% local, 30% peers).
+
+    Falls back to local fitness if no peer data is available or
+    insufficient peer invocations.
+    """
+    local = compute_fitness(allele)
+    if not allele.peer_observations:
+        return local
+    peer_total_s = sum(o.get("successes", 0) for o in allele.peer_observations)
+    peer_total_f = sum(o.get("failures", 0) for o in allele.peer_observations)
+    peer_total = peer_total_s + peer_total_f
+    if peer_total < MIN_INVOCATIONS_FOR_SCORE:
+        return local
+    peer_fitness = peer_total_s / max(peer_total, MIN_INVOCATIONS_FOR_SCORE)
+    return 0.7 * local + 0.3 * peer_fitness
+
+
 def record_success(allele: AlleleMetadata) -> None:
     allele.successful_invocations += 1
     allele.consecutive_failures = 0

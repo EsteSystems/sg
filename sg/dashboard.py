@@ -247,6 +247,31 @@ async def federation_receive(request: Request):
     return {"status": "ok", "sha": sha[:12]}
 
 
+@app.post("/api/federation/fitness")
+async def federation_fitness(request: Request):
+    """Accept fitness observations from a peer for an allele."""
+    data = await request.json()
+    _, reg, _, _ = _load_state()
+    sha = data.get("sha256", "")
+    peer_name = data.get("peer", "unknown")
+
+    # Resolve prefix
+    allele = reg.get(sha)
+    if allele is None:
+        for full_sha in reg.alleles:
+            if full_sha.startswith(sha):
+                allele = reg.get(full_sha)
+                break
+
+    if allele is None:
+        return JSONResponse({"error": "allele not found"}, status_code=404)
+
+    from sg.federation import merge_peer_observation
+    merge_peer_observation(allele, peer_name, data)
+    reg.save_index()
+    return {"status": "ok", "peer_observations": len(allele.peer_observations)}
+
+
 @app.get("/api/federation/alleles/{locus}")
 def federation_alleles(locus: str):
     """Serve alleles for a locus to a peer."""

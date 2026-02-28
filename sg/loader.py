@@ -1,22 +1,24 @@
 """Gene loading via exec().
 
 Genes are Python source strings with an execute(input_json: str) -> str function.
-Loading is exec() into a namespace dict with the kernel injected as `gene_sdk`.
+Loading is exec() into a sandboxed namespace with the kernel injected as `gene_sdk`.
 """
 from __future__ import annotations
 
 from typing import Callable
 
 from sg.kernel.base import NetworkKernel
+from sg.sandbox import make_sandbox_globals
 
 
 def load_gene(source: str, kernel: NetworkKernel) -> Callable[[str], str]:
     """Load a gene from source code. Returns the execute function.
 
     The gene's namespace gets the kernel injected as `gene_sdk` so genes
-    can call `gene_sdk.create_bridge(...)` etc.
+    can call `gene_sdk.create_bridge(...)` etc. Dangerous builtins
+    (exec, eval, open) are blocked and imports are restricted.
     """
-    namespace: dict = {"gene_sdk": kernel}
+    namespace = make_sandbox_globals(kernel)
     exec(source, namespace)
 
     execute_fn = namespace.get("execute")

@@ -227,6 +227,8 @@ def execute_topology(
     Respects on_failure policy:
     - "preserve what works": catch errors per-resource, continue
     - "rollback all": re-raise on first failure (let caller handle)
+
+    Schedules verify diagnostics after successful deployment.
     """
     steps = decompose(topology, input_json)
     outputs: list[str] = []
@@ -278,4 +280,30 @@ def execute_topology(
             + "; ".join(errors)
         )
 
+    # Schedule verify diagnostics if topology declares them
+    _schedule_topology_verify(topology, input_json, orchestrator)
+
     return outputs
+
+
+def _schedule_topology_verify(
+    topology: TopologyContract,
+    input_json: str,
+    orchestrator: object,
+) -> None:
+    """Schedule verify diagnostics from the topology contract."""
+    if not topology.verify:
+        return
+
+    from sg.verify import parse_duration
+
+    delay = 0.0
+    if topology.verify_within:
+        try:
+            delay = parse_duration(topology.verify_within)
+        except ValueError:
+            return
+
+    orchestrator.verify_scheduler.schedule(
+        topology.verify, delay, input_json, orchestrator
+    )

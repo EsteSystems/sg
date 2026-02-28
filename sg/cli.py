@@ -1,4 +1,4 @@
-"""CLI: init, run, status, generate, watch."""
+"""CLI: init, run, status, generate, watch, lineage, compete."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from sg import arena
-from sg.contracts import ContractStore
+from sg.contracts import ContractStore, validate_output
 from sg.fusion import FusionTracker
 from sg.kernel.mock import MockNetworkKernel
 from sg.mutation import MockMutationEngine, MutationEngine
@@ -360,6 +360,139 @@ def cmd_status(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_lineage(args: argparse.Namespace) -> None:
+    """Show mutation ancestry for a locus."""
+    root = get_project_root()
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+
+    locus = args.locus
+    alleles = registry.alleles_for_locus(locus)
+    if not alleles:
+        print(f"No alleles registered for locus '{locus}'")
+        return
+
+    dominant_sha = phenotype.get_dominant(locus)
+
+    # Build parent→children map
+    children: dict[str | None, list] = {}
+    for a in alleles:
+        children.setdefault(a.parent_sha, []).append(a)
+
+    # Find roots (alleles with no parent or whose parent is from another locus)
+    roots = [a for a in alleles if a.parent_sha is None or a.parent_sha not in registry.alleles]
+
+    print(f"=== Lineage: {locus} ({len(alleles)} allele(s)) ===\n")
+
+    def _print_allele(a, indent=0):
+        fitness = arena.compute_fitness(a)
+        marker = " <-- dominant" if a.sha256 == dominant_sha else ""
+        prefix = "  " * indent + ("├── " if indent > 0 else "")
+        print(f"{prefix}{a.sha256[:12]}  gen={a.generation}  "
+              f"fitness={fitness:.3f}  "
+              f"{a.successful_invocations}ok/{a.failed_invocations}fail  "
+              f"state={a.state}{marker}")
+        for child in children.get(a.sha256, []):
+            _print_allele(child, indent + 1)
+
+    for root_allele in roots:
+        _print_allele(root_allele)
+    print()
+
+
+def cmd_compete(args: argparse.Namespace) -> None:
+    """Run allele competition trials for a locus."""
+    root = get_project_root()
+    contract_store = load_contract_store(root)
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+    kernel = MockNetworkKernel()
+
+    locus = args.locus
+    input_json = args.input
+    rounds = getattr(args, "rounds", 10)
+
+    alleles = registry.alleles_for_locus(locus)
+    if not alleles:
+        print(f"No alleles registered for locus '{locus}'")
+        return
+
+    dominant_sha = phenotype.get_dominant(locus)
+    if dominant_sha is None:
+        print(f"No dominant allele for locus '{locus}'")
+        return
+
+    # Filter to alleles that aren't deprecated
+    candidates = [a for a in alleles if a.state != "deprecated"]
+    if len(candidates) < 2:
+        print(f"Only {len(candidates)} non-deprecated allele(s) — nothing to compete")
+        return
+
+    print(f"=== Competition: {locus} ({rounds} rounds, {len(candidates)} allele(s)) ===\n")
+
+    # Run each allele through the rounds
+    results: dict[str, dict] = {}
+    for a in candidates:
+        source = registry.load_source(a.sha256)
+        if source is None:
+            continue
+
+        successes = 0
+        failures = 0
+        for _ in range(rounds):
+            trial_kernel = MockNetworkKernel()
+            try:
+                from sg.loader import load_gene, call_gene
+                execute_fn = load_gene(source, trial_kernel)
+                result = call_gene(execute_fn, input_json)
+                if validate_output(locus, result):
+                    successes += 1
+                    arena.record_success(a)
+                else:
+                    failures += 1
+                    arena.record_failure(a)
+            except Exception:
+                failures += 1
+                arena.record_failure(a)
+
+        trial_fitness = successes / max(rounds, 1)
+        results[a.sha256] = {
+            "allele": a,
+            "successes": successes,
+            "failures": failures,
+            "trial_fitness": trial_fitness,
+        }
+
+        marker = " *" if a.sha256 == dominant_sha else ""
+        print(f"  {a.sha256[:12]}  {successes}/{rounds} passed  "
+              f"trial_fitness={trial_fitness:.3f}  "
+              f"overall_fitness={arena.compute_fitness(a):.3f}  "
+              f"state={a.state}{marker}")
+
+    # Check for promotions
+    dominant = registry.get(dominant_sha)
+    promoted = False
+    if dominant:
+        dominant_result = results.get(dominant_sha)
+        for sha, r in results.items():
+            if sha == dominant_sha:
+                continue
+            if arena.should_promote(r["allele"], dominant):
+                print(f"\n  Promoting {sha[:12]} over {dominant_sha[:12]}!")
+                arena.set_dominant(r["allele"])
+                arena.set_recessive(dominant)
+                phenotype.promote(locus, sha)
+                promoted = True
+                break
+
+    if not promoted:
+        print(f"\n  No promotion triggered — dominant {dominant_sha[:12]} holds")
+
+    registry.save_index()
+    phenotype.save(root / "phenotype.toml")
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="sg", description="Software Genome runtime")
     parser.add_argument("--mutation-engine", default="auto",
@@ -394,6 +527,14 @@ def main() -> None:
 
     subparsers.add_parser("status", help="show genome status")
 
+    lineage_parser = subparsers.add_parser("lineage", help="show mutation ancestry for a locus")
+    lineage_parser.add_argument("locus", help="locus to show lineage for")
+
+    compete_parser = subparsers.add_parser("compete", help="run allele competition trials")
+    compete_parser.add_argument("locus", help="locus to compete")
+    compete_parser.add_argument("--input", required=True, help="test input JSON string")
+    compete_parser.add_argument("--rounds", type=int, default=10, help="number of trial rounds (default: 10)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -410,3 +551,7 @@ def main() -> None:
         cmd_watch(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "lineage":
+        cmd_lineage(args)
+    elif args.command == "compete":
+        cmd_compete(args)

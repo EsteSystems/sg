@@ -1,0 +1,34 @@
+topology production_server
+  does:
+    Standard production server: management bridge on first NIC,
+    storage bond on next two NICs, VLAN bridges on the bond.
+
+  takes:
+    bridge_name     string    "Management bridge name"
+    bridge_ifaces   string[]  "Bridge port interfaces"
+    uplink          string    "Uplink interface"
+    bond_name       string    "Bond interface name"
+    bond_mode       string    "Bond mode"
+    bond_members    string[]  "Bond member interfaces"
+    vlans           int[]     "VLAN IDs"
+
+  has:
+    management:
+      is bridge
+      uplink {uplink}
+      stp enabled
+
+    storage:
+      is bond
+      mode {bond_mode}
+      members {bond_members}
+
+    vm_traffic:
+      is vlan_bridges
+      trunk storage
+      vlans {vlans}
+
+  verify:
+    check_connectivity bridge_name={bridge_name}
+    check_bond_state bond_name={bond_name}
+    within 60s

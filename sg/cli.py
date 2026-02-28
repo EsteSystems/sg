@@ -168,6 +168,29 @@ def cmd_run(args: argparse.Namespace) -> None:
             print(output)
 
 
+def cmd_deploy(args: argparse.Namespace) -> None:
+    """Deploy a topology."""
+    orch = make_orchestrator(args)
+
+    try:
+        outputs = orch.run_topology(args.topology, args.input)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        orch.verify_scheduler.wait()
+        orch.save_state()
+
+    for i, output in enumerate(outputs):
+        if len(outputs) > 1:
+            print(f"--- Output {i + 1} ---")
+        try:
+            parsed = json.loads(output)
+            print(json.dumps(parsed, indent=2))
+        except json.JSONDecodeError:
+            print(output)
+
+
 def cmd_generate(args: argparse.Namespace) -> None:
     """Proactively generate competing alleles from contracts."""
     root = get_project_root()
@@ -344,6 +367,10 @@ def main() -> None:
     watch_parser.add_argument("--interval", type=float, default=300.0, help="seconds between runs (default: 300)")
     watch_parser.add_argument("--count", type=int, default=0, help="number of iterations (0 = infinite, default: 0)")
 
+    deploy_parser = subparsers.add_parser("deploy", help="deploy a topology")
+    deploy_parser.add_argument("topology", help="topology name")
+    deploy_parser.add_argument("--input", required=True, help="input JSON string")
+
     subparsers.add_parser("status", help="show genome status")
 
     args = parser.parse_args()
@@ -352,6 +379,8 @@ def main() -> None:
         cmd_init(args)
     elif args.command == "run":
         cmd_run(args)
+    elif args.command == "deploy":
+        cmd_deploy(args)
     elif args.command == "generate":
         if not getattr(args, "all", False) and not args.locus:
             gen_parser.error("either provide a locus name or use --all")

@@ -125,6 +125,13 @@ class ContractStore:
     def get_pathway(self, name: str) -> PathwayContract | None:
         return self.pathways.get(name)
 
+    def get_topology(self, name: str) -> TopologyContract | None:
+        return self.topologies.get(name)
+
+    def known_topologies(self) -> list[str]:
+        """Return all known topology names."""
+        return list(self.topologies.keys())
+
     @classmethod
     def open(cls, contracts_dir: Path) -> ContractStore:
         """Create a ContractStore by scanning a contracts directory."""

@@ -362,6 +362,19 @@ class Orchestrator:
             except Exception as e:
                 print(f"  [safety] cleanup failed for {resource_type} '{name}': {e}")
 
+    def run_topology(self, topology_name: str, input_json: str) -> list[str]:
+        """Execute a named topology by decomposing into pathway/gene calls."""
+        from sg.topology import execute_topology
+
+        topology = self.contract_store.get_topology(topology_name)
+        if topology is None:
+            raise ValueError(f"unknown topology: {topology_name}")
+
+        print(f"Deploying topology: {topology_name}")
+        outputs = execute_topology(topology, input_json, self)
+        print(f"Topology '{topology_name}' deployed ({len(outputs)} output(s))")
+        return outputs
+
     def save_state(self) -> None:
         self.registry.save_index()
         phenotype_path = self.project_root / "phenotype.toml"

@@ -233,4 +233,4 @@ sg test bridge_create -v               # test specific locus
 
 ## License
 
-Copyright Este Systems. All rights reserved.
+BSD 2-Clause License. See [LICENSE](LICENSE).

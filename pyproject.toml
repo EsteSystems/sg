@@ -3,7 +3,7 @@ name = "software-genomics"
 version = "0.2.0"
 description = "Software Genomics — evolutionary software runtime"
 requires-python = ">=3.9"
-license = {text = "MIT"}
+license = {text = "BSD-2-Clause"}
 dependencies = [
     "tomli>=2.0; python_version<'3.11'",
     "tomli_w>=1.0",

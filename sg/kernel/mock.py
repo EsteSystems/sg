@@ -70,6 +70,10 @@ class ArpEntry:
 class MockNetworkKernel(NetworkKernel):
     """In-memory network simulation. Injected into genes as `gene_sdk`."""
 
+    def create_shadow(self) -> MockNetworkKernel:
+        """Return a fresh mock kernel for shadow execution."""
+        return MockNetworkKernel()
+
     def __init__(self) -> None:
         self._bridges: dict[str, BridgeState] = {}
         self._bonds: dict[str, BondState] = {}

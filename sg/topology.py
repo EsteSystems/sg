@@ -182,7 +182,7 @@ def _map_vlan_bridges(resource: TopologyResource, data: dict) -> TopologyStep:
     )
 
 
-# Resource type → mapper function
+# Legacy resource type → mapper function (for backward compat)
 _RESOURCE_MAPPERS = {
     "bridge": _map_bridge,
     "bond": _map_bond,
@@ -191,7 +191,9 @@ _RESOURCE_MAPPERS = {
 
 
 def decompose(
-    topology: TopologyContract, input_json: str,
+    topology: TopologyContract,
+    input_json: str,
+    resource_mappers: dict | None = None,
 ) -> list[TopologyStep]:
     """Decompose a topology into ordered execution steps.
 
@@ -199,14 +201,19 @@ def decompose(
     2. Build dependency graph from inter-resource references
     3. Topological sort
     4. Map each resource to a pathway/gene call
+
+    Args:
+        resource_mappers: Optional domain-specific resource type -> mapper
+            mapping. Falls back to built-in mappers if not provided.
     """
+    mappers = resource_mappers or _RESOURCE_MAPPERS
     data = json.loads(input_json)
     depends_on = _build_dependency_graph(topology.has)
     ordered = _topological_sort(topology.has, depends_on)
 
     steps = []
     for resource in ordered:
-        mapper = _RESOURCE_MAPPERS.get(resource.resource_type)
+        mapper = mappers.get(resource.resource_type)
         if mapper is None:
             raise ValueError(
                 f"unknown resource type '{resource.resource_type}' "
@@ -221,6 +228,7 @@ def execute_topology(
     topology: TopologyContract,
     input_json: str,
     orchestrator: object,
+    resource_mappers: dict | None = None,
 ) -> list[str]:
     """Execute a topology by decomposing and running each step.
 
@@ -230,7 +238,7 @@ def execute_topology(
 
     Schedules verify diagnostics after successful deployment.
     """
-    steps = decompose(topology, input_json)
+    steps = decompose(topology, input_json, resource_mappers)
     outputs: list[str] = []
     errors: list[str] = []
     preserve = topology.on_failure == "preserve what works"

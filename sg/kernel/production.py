@@ -25,6 +25,11 @@ PROTECTED_INTERFACES = _BASE_PROTECTED | {i.strip() for i in _extra.split(",") i
 class ProductionNetworkKernel(NetworkKernel):
     """Real network kernel using ip/bridge/sysfs commands."""
 
+    def create_shadow(self) -> NetworkKernel:
+        """Return a mock kernel for shadow execution."""
+        from sg.kernel.mock import MockNetworkKernel
+        return MockNetworkKernel()
+
     def __init__(self, use_sudo: bool = True, dry_run: bool = False) -> None:
         self._use_sudo = use_sudo
         self._dry_run = dry_run

@@ -14,6 +14,10 @@ def execute(input_json: str) -> str:
 
     try:
         result = gene_sdk.create_bridge(bridge_name, interfaces)
-        return json.dumps({"success": True, "bridge": result})
+        gene_sdk.track_resource("bridge", bridge_name)
+        return json.dumps({
+            "success": True,
+            "resources_created": [bridge_name],
+        })
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})

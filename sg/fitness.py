@@ -23,6 +23,9 @@ RESILIENCE_WEIGHT = 0.20
 # Retroactive decay: each convergence failure reduces immediate score
 CONVERGENCE_DECAY_FACTOR = 0.2
 
+# Maximum fitness records kept per allele (sliding window)
+MAX_FITNESS_RECORDS = 200
+
 
 @dataclass
 class FitnessRecord:
@@ -114,3 +117,6 @@ def record_feedback(
         source_locus=source_locus,
     )
     allele.fitness_records.append(record.to_dict())
+    # Sliding window: keep only the most recent records
+    if len(allele.fitness_records) > MAX_FITNESS_RECORDS:
+        allele.fitness_records = allele.fitness_records[-MAX_FITNESS_RECORDS:]

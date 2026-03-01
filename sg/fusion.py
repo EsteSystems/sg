@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from sg.kernel.base import NetworkKernel
+from sg.kernel.base import Kernel
 from sg.loader import load_gene, call_gene
 from sg.mutation import MutationEngine
 from sg.registry import Registry
@@ -141,7 +141,7 @@ def try_fused_execution(
     registry: Registry,
     phenotype: PhenotypeMap,
     fusion_tracker: FusionTracker,
-    kernel: NetworkKernel,
+    kernel: Kernel,
 ) -> str | None:
     """Try executing the fused gene for a pathway.
 

@@ -148,12 +148,54 @@ class ContractStore:
         return store
 
 
-# --- Output validation (contract-independent) ---
+# --- Output validation ---
 
-def validate_output(locus: str, output_json: str) -> bool:
+
+def _check_field_type(value, field_type: str) -> bool:
+    """Check if a value matches the expected .sg type."""
+    if value is None:
+        return True  # None passes type check; optionality checked separately
+    if field_type.endswith("[]"):
+        if not isinstance(value, list):
+            return False
+        base = field_type[:-2]
+        return all(_check_field_type(item, base) for item in value)
+    type_checks = {
+        "string": lambda v: isinstance(v, str),
+        "bool": lambda v: isinstance(v, bool),
+        "int": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "float": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    }
+    check = type_checks.get(field_type)
+    if check is None:
+        return True  # unknown types pass (custom types)
+    return check(value)
+
+
+def _validate_gives_schema(data: dict, gives: list[FieldDef]) -> bool:
+    """Validate output data against the gives field definitions."""
+    for f in gives:
+        if f.name == "success":
+            continue  # already validated
+        if f.required and not f.optional:
+            if f.name not in data:
+                return False
+        if f.name in data:
+            if not _check_field_type(data[f.name], f.type):
+                return False
+    return True
+
+
+def validate_output(
+    locus: str,
+    output_json: str,
+    contract_store: ContractStore | None = None,
+) -> bool:
     """Validate that a gene's output conforms to the locus contract.
 
     Checks that the output is valid JSON containing a 'success' boolean field.
+    When a contract_store is provided and the output reports success,
+    also validates required 'gives' fields and types.
     """
     try:
         data = json.loads(output_json)
@@ -165,4 +207,12 @@ def validate_output(locus: str, output_json: str) -> bool:
         return False
     if not isinstance(data["success"], bool):
         return False
+
+    # Schema enforcement: when success=True and contract available
+    if data["success"] and contract_store is not None:
+        gene = contract_store.get_gene(locus)
+        if gene is not None and gene.gives:
+            if not _validate_gives_schema(data, gene.gives):
+                return False
+
     return True

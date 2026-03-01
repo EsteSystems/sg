@@ -12,3 +12,4 @@ venv/
 phenotype.toml
 fusion_tracker.json
 registry/
+tmp/

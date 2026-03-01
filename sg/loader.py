@@ -7,11 +7,11 @@ from __future__ import annotations
 
 from typing import Callable
 
-from sg.kernel.base import NetworkKernel
+from sg.kernel.base import Kernel
 from sg.sandbox import make_sandbox_globals
 
 
-def load_gene(source: str, kernel: NetworkKernel) -> Callable[[str], str]:
+def load_gene(source: str, kernel: Kernel) -> Callable[[str], str]:
     """Load a gene from source code. Returns the execute function.
 
     The gene's namespace gets the kernel injected as `gene_sdk` so genes

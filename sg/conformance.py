@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Union
 
 from sg.contracts import ContractStore, validate_output
-from sg.kernel.base import NetworkKernel
+from sg.kernel.base import Kernel
 from sg.loader import load_gene, call_gene
 from sg.parser.types import GeneContract, GeneFamily, FieldDef
 from sg.phenotype import PhenotypeMap
@@ -85,7 +85,7 @@ def generate_test_inputs(contract: GeneContract) -> list[str]:
 def check_gene_conformance(
     source: str,
     contract: GeneContract,
-    kernel: NetworkKernel,
+    kernel: Kernel,
     sha: str = "unknown",
     test_inputs: list[str] | None = None,
 ) -> ConformanceResult:
@@ -175,7 +175,7 @@ class ConformanceSuite:
         contract_store: ContractStore,
         registry: Registry,
         phenotype: PhenotypeMap,
-        kernel: NetworkKernel,
+        kernel: Kernel,
     ) -> list[ConformanceResult]:
         results = []
         for locus in contract_store.known_loci():
@@ -203,7 +203,7 @@ class ConformanceSuite:
         contract_store: ContractStore,
         registry: Registry,
         phenotype: PhenotypeMap,
-        kernel: NetworkKernel,
+        kernel: Kernel,
     ) -> ConformanceResult | None:
         contract = contract_store.get_gene(locus)
         if contract is None:

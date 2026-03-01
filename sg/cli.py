@@ -30,7 +30,8 @@ def load_contract_store(root: Path) -> ContractStore:
 
 
 def make_mutation_engine(
-    args: argparse.Namespace, project_root: Path, contract_store: ContractStore
+    args: argparse.Namespace, project_root: Path, contract_store: ContractStore,
+    kernel=None,
 ) -> MutationEngine:
     engine = getattr(args, "mutation_engine", "auto")
     model = getattr(args, "model", None)
@@ -38,13 +39,19 @@ def make_mutation_engine(
     if engine == "mock":
         return MockMutationEngine(project_root / "fixtures")
 
+    extra = {}
+    if model:
+        extra["model"] = model
+    if kernel is not None:
+        extra["kernel"] = kernel
+
     if engine == "claude":
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             print("error: --mutation-engine=claude requires ANTHROPIC_API_KEY", file=sys.stderr)
             sys.exit(1)
         from sg.mutation import ClaudeMutationEngine
-        return ClaudeMutationEngine(api_key, contract_store, **({"model": model} if model else {}))
+        return ClaudeMutationEngine(api_key, contract_store, **extra)
 
     if engine == "openai":
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -52,7 +59,7 @@ def make_mutation_engine(
             print("error: --mutation-engine=openai requires OPENAI_API_KEY", file=sys.stderr)
             sys.exit(1)
         from sg.mutation import OpenAIMutationEngine
-        return OpenAIMutationEngine(api_key, contract_store, **({"model": model} if model else {}))
+        return OpenAIMutationEngine(api_key, contract_store, **extra)
 
     if engine == "deepseek":
         api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -60,7 +67,7 @@ def make_mutation_engine(
             print("error: --mutation-engine=deepseek requires DEEPSEEK_API_KEY", file=sys.stderr)
             sys.exit(1)
         from sg.mutation import DeepSeekMutationEngine
-        return DeepSeekMutationEngine(api_key, contract_store, **({"model": model} if model else {}))
+        return DeepSeekMutationEngine(api_key, contract_store, **extra)
 
     # auto: try Claude, OpenAI, DeepSeek, fall back to mock
     for env_var, engine_cls_name in [
@@ -72,7 +79,7 @@ def make_mutation_engine(
         if api_key:
             import sg.mutation as mut
             engine_cls = getattr(mut, engine_cls_name)
-            return engine_cls(api_key, contract_store, **({"model": model} if model else {}))
+            return engine_cls(api_key, contract_store, **extra)
 
     return MockMutationEngine(project_root / "fixtures")
 
@@ -92,8 +99,8 @@ def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
-    mutation_engine = make_mutation_engine(args, root, contract_store)
     kernel = make_kernel(args)
+    mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
 
     return Orchestrator(
         registry=registry,
@@ -225,7 +232,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
     contract_store = load_contract_store(root)
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
-    mutation_engine = make_mutation_engine(args, root, contract_store)
+    kernel = make_kernel(args)
+    mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
     count = getattr(args, "count", 1)
 
     if getattr(args, "all", False):
@@ -551,7 +559,8 @@ def cmd_evolve(args: argparse.Namespace) -> None:
     """Generate a new contract via LLM."""
     root = get_project_root()
     contract_store = load_contract_store(root)
-    mutation_engine = make_mutation_engine(args, root, contract_store)
+    kernel = make_kernel(args)
+    mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
 
     existing = contract_store.known_loci()
     try:

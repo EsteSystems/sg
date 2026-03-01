@@ -11,7 +11,7 @@ from sg import arena
 from sg.contracts import ContractStore, validate_output
 from sg.fitness import record_feedback
 from sg.fusion import FusionTracker
-from sg.kernel.base import NetworkKernel
+from sg.kernel.base import Kernel
 from sg.loader import load_gene, call_gene
 from sg.mutation import MutationEngine, MutationContext
 from sg.parser.types import BlastRadius
@@ -33,7 +33,7 @@ class Orchestrator:
         phenotype: PhenotypeMap,
         mutation_engine: MutationEngine,
         fusion_tracker: FusionTracker,
-        kernel: NetworkKernel,
+        kernel: Kernel,
         contract_store: ContractStore,
         project_root: Path,
     ):
@@ -276,9 +276,7 @@ class Orchestrator:
         is untouched. Accumulates shadow_successes on the allele; once
         the threshold is met, subsequent calls use the real kernel.
         """
-        from sg.kernel.mock import MockNetworkKernel
-
-        shadow_kernel = MockNetworkKernel()
+        shadow_kernel = self.kernel.create_shadow()
         try:
             execute_fn = load_gene(source, shadow_kernel)
             result = call_gene(execute_fn, input_json)
@@ -393,15 +391,7 @@ class Orchestrator:
         print(f"  [safety] rolling back {len(new_resources)} resource(s)...")
         for resource_type, name in new_resources:
             try:
-                if resource_type == "bridge":
-                    self.kernel.delete_bridge(name)
-                elif resource_type == "bond":
-                    self.kernel.delete_bond(name)
-                elif resource_type == "vlan":
-                    parts = name.split(".", 1)
-                    if len(parts) == 2:
-                        self.kernel.delete_vlan(parts[0], int(parts[1]))
-                self.kernel.untrack_resource(resource_type, name)
+                self.kernel.delete_resource(resource_type, name)
                 print(f"  [safety] cleaned up {resource_type} '{name}'")
             except Exception as e:
                 print(f"  [safety] cleanup failed for {resource_type} '{name}': {e}")
@@ -415,7 +405,9 @@ class Orchestrator:
             raise ValueError(f"unknown topology: {topology_name}")
 
         print(f"Deploying topology: {topology_name}")
-        outputs = execute_topology(topology, input_json, self)
+        outputs = execute_topology(
+            topology, input_json, self, self.kernel.resource_mappers()
+        )
         print(f"Topology '{topology_name}' deployed ({len(outputs)} output(s))")
         return outputs
 

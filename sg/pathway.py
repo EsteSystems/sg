@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Union
 
-from sg.kernel.base import NetworkKernel
+from sg.kernel.base import Kernel
 from sg.fusion import FusionTracker, fuse_pathway, try_fused_execution
 from sg.mutation import MutationEngine
 from sg.phenotype import PhenotypeMap
@@ -78,7 +78,7 @@ def execute_pathway(
     registry: Registry,
     phenotype: PhenotypeMap,
     mutation_engine: MutationEngine,
-    kernel: NetworkKernel,
+    kernel: Kernel,
 ) -> list[str]:
     """Execute a pathway, returning the list of step outputs."""
     fused_result = try_fused_execution(

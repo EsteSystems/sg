@@ -90,8 +90,9 @@ class LLMMutationEngine(MutationEngine):
     Subclasses only need to implement _call_api().
     """
 
-    def __init__(self, contract_store: ContractStore):
+    def __init__(self, contract_store: ContractStore, kernel: 'Kernel | None' = None):
         self.contract_store = contract_store
+        self._kernel = kernel
 
     @abstractmethod
     def _call_api(self, prompt: str) -> str:
@@ -101,6 +102,24 @@ class LLMMutationEngine(MutationEngine):
     @property
     def provider_name(self) -> str:
         return "llm"
+
+    def _system_context(self) -> str:
+        """Build domain-aware system context from kernel self-description."""
+        if self._kernel is not None:
+            ops = self._kernel.describe_operations()
+            domain_ctx = self._kernel.mutation_prompt_context()
+        else:
+            ops = []
+            domain_ctx = ""
+        if ops:
+            ops_text = "\n".join(f"  - gene_sdk.{op}" for op in ops)
+            ops_section = f"The gene has access to `gene_sdk` with these operations:\n{ops_text}"
+        else:
+            ops_section = "The gene has access to `gene_sdk` in its namespace (a kernel instance)."
+        ctx = f"A gene is a Python function that takes a JSON string and returns a JSON string.\n{ops_section}"
+        if domain_ctx:
+            ctx += f"\n\n{domain_ctx}"
+        return ctx
 
     def _extract_python(self, text: str) -> str:
         match = re.search(r"```python\s*\n(.*?)```", text, re.DOTALL)
@@ -146,10 +165,10 @@ class LLMMutationEngine(MutationEngine):
 
     def mutate(self, ctx: MutationContext) -> str:
         contract_ctx = self._contract_prompt(ctx.locus)
+        system_ctx = self._system_context()
         prompt = f"""You are a gene mutation engine for the Software Genomics runtime.
 
-A gene is a Python function that takes a JSON string and returns a JSON string.
-The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
+{system_ctx}
 
 ## Contract
 {contract_ctx}
@@ -166,7 +185,7 @@ Error: {ctx.error_message}
 ## Task
 Write a fixed version of this gene. The gene must:
 1. Define an `execute(input_json: str) -> str` function
-2. Use `gene_sdk` for kernel operations (create_bridge, set_stp, etc.)
+2. Use `gene_sdk` for all domain operations (see available operations above)
 3. Return valid JSON with at least a "success" boolean field
 4. Handle the error case described above
 
@@ -176,11 +195,11 @@ Return ONLY the Python source code in a ```python``` block."""
 
     def generate(self, locus: str, contract_prompt: str,
                  count: int = 1) -> list[str]:
+        system_ctx = self._system_context()
         if count == 1:
             prompt = f"""You are a gene generation engine for the Software Genomics runtime.
 
-A gene is a Python function that takes a JSON string and returns a JSON string.
-The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
+{system_ctx}
 
 ## Contract
 {contract_prompt}
@@ -188,7 +207,7 @@ The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
 ## Task
 Write a Python implementation of this gene. The gene must:
 1. Define an `execute(input_json: str) -> str` function
-2. Use `gene_sdk` for kernel operations (create_bridge, set_stp, get_device_mac, etc.)
+2. Use `gene_sdk` for all domain operations (see available operations above)
 3. Parse input with `json.loads(input_json)`
 4. Return valid JSON (via `json.dumps()`) with at least a "success" boolean field
 5. Handle all failure modes described in the contract
@@ -197,8 +216,7 @@ Return ONLY the Python source code in a ```python``` block."""
         else:
             prompt = f"""You are a gene generation engine for the Software Genomics runtime.
 
-A gene is a Python function that takes a JSON string and returns a JSON string.
-The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
+{system_ctx}
 
 ## Contract
 {contract_prompt}
@@ -207,7 +225,7 @@ The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
 Write {count} DIFFERENT implementations of this gene, each using a different approach
 or strategy. Each implementation must:
 1. Define an `execute(input_json: str) -> str` function
-2. Use `gene_sdk` for kernel operations (create_bridge, set_stp, get_device_mac, etc.)
+2. Use `gene_sdk` for all domain operations (see available operations above)
 3. Parse input with `json.loads(input_json)`
 4. Return valid JSON (via `json.dumps()`) with at least a "success" boolean field
 5. Handle all failure modes described in the contract
@@ -237,10 +255,12 @@ Return ONLY Python source code in ```python``` blocks, separated by ---VARIANT--
             contract_ctx = self._contract_prompt(locus)
             steps_desc.append(f"### Step {i + 1}: {locus}\n{contract_ctx}\n```python\n{source}\n```")
 
+        system_ctx = self._system_context()
         prompt = f"""You are a gene fusion engine for the Software Genomics runtime.
 
+{system_ctx}
+
 A fused gene combines multiple pathway steps into a single optimized gene.
-The gene has access to `gene_sdk` in its namespace (a NetworkKernel instance).
 
 ## Pathway: {pathway_name}
 
@@ -251,7 +271,7 @@ Write a single fused gene that performs all steps in sequence, optimizing
 away intermediate JSON serialization where possible. The gene must:
 1. Define an `execute(input_json: str) -> str` function
 2. Accept the full pathway input (all fields from all steps)
-3. Use `gene_sdk` for all kernel operations
+3. Use `gene_sdk` for all domain operations
 4. Return valid JSON with "success": true on success
 
 Return ONLY the Python source code in a ```python``` block."""
@@ -294,8 +314,8 @@ class ClaudeMutationEngine(LLMMutationEngine):
     """Calls the Anthropic API to generate mutations."""
 
     def __init__(self, api_key: str, contract_store: ContractStore,
-                 model: str = "claude-sonnet-4-5-20250929"):
-        super().__init__(contract_store)
+                 model: str = "claude-sonnet-4-5-20250929", kernel: 'Kernel | None' = None):
+        super().__init__(contract_store, kernel=kernel)
         self.api_key = api_key
         self.model = model
 
@@ -335,8 +355,9 @@ class OpenAIMutationEngine(LLMMutationEngine):
     DEFAULT_MODEL = "gpt-4o"
 
     def __init__(self, api_key: str, contract_store: ContractStore,
-                 model: str | None = None, base_url: str | None = None):
-        super().__init__(contract_store)
+                 model: str | None = None, base_url: str | None = None,
+                 kernel: 'Kernel | None' = None):
+        super().__init__(contract_store, kernel=kernel)
         self.api_key = api_key
         self.model = model or self.DEFAULT_MODEL
         self.base_url = base_url or self.DEFAULT_BASE_URL

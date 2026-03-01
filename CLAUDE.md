@@ -4,7 +4,7 @@
 
 Python implementation of the Software Genomics paradigm — an evolutionary software runtime. Genes are pure Python functions, loaded via `exec()`, scored by temporal fitness, and replaced by LLM-generated mutations when they fail. Contracts are defined in the `.sg` format and authored by domain experts.
 
-See `SOFTWARE-GENOMICS.md` for the full paradigm whitepaper.
+See `docs/SOFTWARE-GENOMICS.md` for the full paradigm whitepaper.
 
 ## Project Structure
 

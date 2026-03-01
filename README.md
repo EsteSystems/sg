@@ -2,7 +2,7 @@
 
 An evolutionary software runtime where genes (pure functions) compete at typed contract slots, scored by fitness from real execution, and replaced by LLM-generated mutations when they fail. The system treats runtime errors as evolutionary signal, not bugs.
 
-See [SOFTWARE-GENOMICS.md](SOFTWARE-GENOMICS.md) for the full paradigm whitepaper.
+See [SOFTWARE-GENOMICS.md](docs/SOFTWARE-GENOMICS.md) for the full paradigm whitepaper, or the [Handbook](docs/HANDBOOK.md) for the comprehensive usage guide.
 
 ## Concepts
 

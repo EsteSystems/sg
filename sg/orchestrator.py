@@ -95,7 +95,7 @@ class Orchestrator:
                 execute_fn = load_gene(source, kernel)
                 result = call_gene(execute_fn, input_json)
 
-                if not validate_output(locus, result):
+                if not validate_output(locus, result, self.contract_store):
                     raise RuntimeError(f"output validation failed for {locus}")
 
                 if txn:
@@ -169,7 +169,7 @@ class Orchestrator:
                 execute_fn = load_gene(new_source, kernel)
                 result = call_gene(execute_fn, input_json)
 
-                if not validate_output(locus, result):
+                if not validate_output(locus, result, self.contract_store):
                     raise RuntimeError("output validation failed")
 
                 if txn:
@@ -281,7 +281,7 @@ class Orchestrator:
             execute_fn = load_gene(source, shadow_kernel)
             result = call_gene(execute_fn, input_json)
 
-            if not validate_output(locus, result):
+            if not validate_output(locus, result, self.contract_store):
                 raise RuntimeError(f"shadow output validation failed for {locus}")
 
             allele.shadow_successes += 1

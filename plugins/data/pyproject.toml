@@ -1,0 +1,19 @@
+[project]
+name = "sg-data"
+version = "0.2.0"
+description = "Software Genomics — data pipeline domain plugin"
+requires-python = ">=3.9"
+license = {text = "BSD-2-Clause"}
+dependencies = [
+    "software-genomics>=0.2.0",
+]
+
+[project.entry-points."sg.kernels"]
+data-mock = "sg_data.mock:MockDataKernel"
+
+[tool.setuptools.packages.find]
+include = ["sg_data*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

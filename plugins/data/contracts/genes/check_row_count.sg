@@ -1,0 +1,27 @@
+gene check_row_count for data
+  is diagnostic
+  risk none
+
+  does:
+    Check the row count of a database table. Returns whether the table
+    has the expected minimum number of rows. Used as a convergence signal
+    for data ingestion genes.
+
+  takes:
+    connection  string  "Database connection name"
+    table       string  "Table to check"
+
+  gives:
+    success    bool  "Whether the check completed"
+    healthy    bool  "Whether the table has rows"
+    row_count  int   "Current row count"
+    error      string? "Error message on failure"
+
+  verify:
+    - table has at least one row
+
+  feeds:
+    ingest_csv_to_table convergence
+
+  fails when:
+    - table does not exist -> success=false

@@ -1,0 +1,31 @@
+gene check_nulls for data
+  is diagnostic
+  risk none
+
+  does:
+    Check for null values in a specific column of a database table.
+    Reports the null ratio and whether data quality meets the threshold.
+    A null ratio above 10% is considered unhealthy.
+
+  takes:
+    connection  string  "Database connection name"
+    table       string  "Table to check"
+    column      string  "Column to check for nulls"
+
+  gives:
+    success     bool    "Whether the check completed"
+    healthy     bool    "Whether null ratio is acceptable"
+    null_count  int     "Number of null values"
+    total_rows  int     "Total number of rows"
+    null_ratio  float   "Ratio of nulls to total rows"
+    error       string? "Error message on failure"
+
+  verify:
+    - null ratio is below 10%
+
+  feeds:
+    ingest_csv_to_table convergence
+
+  fails when:
+    - table does not exist -> success=false
+    - column does not exist -> success=false

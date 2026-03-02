@@ -1,0 +1,30 @@
+pathway ingest_and_validate for data
+  risk low
+
+  does:
+    Ingest CSV data from a URL into a database table, then validate
+    the data quality by checking row count and null values.
+
+  takes:
+    url         string  "URL to fetch CSV data from"
+    connection  string  "Database connection name"
+    table       string  "Target table name"
+    column      string  "Column to check for nulls"
+
+  steps:
+    1. ingest_csv_to_table
+         url = {url}
+         connection = {connection}
+         table = {table}
+
+    2. check_row_count
+         connection = {connection}
+         table = {table}
+
+    3. check_nulls
+         connection = {connection}
+         table = {table}
+         column = {column}
+
+  on failure:
+    rollback all

@@ -1,0 +1,36 @@
+gene ingest_csv_to_table for data
+  is configuration
+  risk low
+
+  does:
+    Fetch CSV data from a URL and load it into a database table.
+    Parses the CSV response, validates column names against the table
+    schema, and writes records as rows. Tracks the table as a managed
+    resource for rollback.
+
+  takes:
+    url         string  "URL to fetch CSV data from"
+    connection  string  "Database connection name"
+    table       string  "Target table name"
+
+  gives:
+    success        bool    "Whether the ingest completed"
+    rows_written   int     "Number of rows written"
+    error          string? "Error message on failure"
+
+  before:
+    - Target table exists with a compatible schema
+    - URL is reachable and returns CSV data
+
+  after:
+    - All CSV rows are written to the target table
+    - Table row count increased by the number of CSV rows
+
+  fails when:
+    - URL unreachable -> success=false
+    - table does not exist -> error
+    - schema mismatch -> success=false
+
+  verify:
+    check_row_count connection={connection} table={table}
+    within 30s

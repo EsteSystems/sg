@@ -104,6 +104,32 @@ class TestDemotion:
         assert not should_demote_pathway(allele)
 
 
+class TestPromotionBoundary:
+    def test_exactly_200_executions_qualifies(self):
+        """Exactly 200 executions should qualify for promotion."""
+        candidate = _make_allele(
+            total_executions=200, successful_executions=200,
+        )
+        assert should_promote_pathway(candidate, None)
+
+    def test_exactly_199_executions_rejects(self):
+        candidate = _make_allele(
+            total_executions=199, successful_executions=199,
+        )
+        assert not should_promote_pathway(candidate, None)
+
+    def test_exactly_0_15_advantage_promotes(self):
+        """Exactly +0.15 advantage uses >= so should promote."""
+        # candidate = 180/200 = 0.90, dominant = 150/200 = 0.75, advantage = 0.15
+        candidate = _make_allele(
+            total_executions=200, successful_executions=180,
+        )
+        dominant = _make_allele(
+            total_executions=200, successful_executions=150,
+        )
+        assert should_promote_pathway(candidate, dominant)
+
+
 class TestSetStates:
     def test_set_dominant(self):
         allele = _make_allele()

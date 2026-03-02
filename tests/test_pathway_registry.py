@@ -88,6 +88,44 @@ class TestComputeStructureSha:
         assert compute_structure_sha(steps1) != compute_structure_sha(steps2)
 
 
+class TestComputeStructureShaBoundary:
+    def test_sha_empty_steps(self):
+        """Empty step list produces a consistent hash."""
+        sha1 = compute_structure_sha([])
+        sha2 = compute_structure_sha([])
+        assert sha1 == sha2
+        assert len(sha1) == 64
+
+    def test_sha_nested_conditional(self):
+        """Conditional inside branches affects SHA differently."""
+        steps1 = [StepSpec(
+            step_type="conditional", target="",
+            condition_step_index=0, condition_field="mode",
+            branches={
+                "a": {"step_type": "conditional", "target": "",
+                       "condition_field": "sub", "branches": {}},
+            },
+        )]
+        steps2 = [StepSpec(
+            step_type="conditional", target="",
+            condition_step_index=0, condition_field="mode",
+            branches={
+                "a": {"step_type": "locus", "target": "x"},
+            },
+        )]
+        assert compute_structure_sha(steps1) != compute_structure_sha(steps2)
+
+    def test_allele_created_at_populated(self):
+        """PathwayAllele.created_at is set automatically to current time."""
+        import time
+        before = time.time()
+        allele = PathwayAllele(
+            structure_sha="test", pathway_name="pw", steps=[],
+        )
+        after = time.time()
+        assert before <= allele.created_at <= after
+
+
 class TestPathwayAllele:
     def test_to_dict_roundtrip(self):
         steps = [StepSpec(step_type="locus", target="a")]

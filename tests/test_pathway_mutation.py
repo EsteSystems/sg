@@ -223,6 +223,30 @@ class TestReorderingOperator:
         result = op.apply(ctx)
         assert result is None  # Cannot reorder due to dependency
 
+    def test_six_steps_uses_full_permutation(self):
+        """6 steps is the boundary — should use full permutations, not swaps."""
+        op = ReorderingOperator()
+        steps = [StepSpec(step_type="locus", target=f"s{i}") for i in range(6)]
+        anomalies = [TimingAnomaly(step_name="s5", latest_ms=100, avg_ms=10, ratio=10.0)]
+        ctx = _make_ctx(steps=steps, timing_anomalies=anomalies)
+        result = op.apply(ctx)
+        # Should find a permutation (6! = 720 candidates minus identity)
+        assert result is not None
+
+    def test_seven_steps_uses_adjacent_swap(self):
+        """7 steps exceeds boundary — should use adjacent swaps only."""
+        op = ReorderingOperator()
+        steps = [StepSpec(step_type="locus", target=f"s{i}") for i in range(7)]
+        anomalies = [TimingAnomaly(step_name="s6", latest_ms=100, avg_ms=10, ratio=10.0)]
+        ctx = _make_ctx(steps=steps, timing_anomalies=anomalies)
+        result = op.apply(ctx)
+        if result is not None:
+            # Adjacent swap: exactly one pair should differ from original
+            diffs = sum(
+                1 for a, b in zip(steps, result.new_steps) if a.target != b.target
+            )
+            assert diffs == 2  # one swap = two positions differ
+
     def test_respects_data_flow_dependency(self):
         """Steps linked by takes/gives data flow cannot be reordered."""
         from sg.parser.types import GeneContract, FieldDef, GeneFamily, BlastRadius
@@ -366,6 +390,46 @@ class TestStepSubstitutionOperator:
         assert result is not None
         assert result.new_steps[0].target == "replacement"
 
+    def test_substitution_picks_highest_fitness(self):
+        """With multiple compatible loci, picks the one with highest fitness."""
+        from sg.parser.types import GeneContract, FieldDef, GeneFamily, BlastRadius
+
+        cs = ContractStore()
+        cs.genes = {
+            "failing": GeneContract(
+                name="failing", family=GeneFamily.CONFIGURATION,
+                risk=BlastRadius.LOW, does="fails",
+                takes=[FieldDef(name="x", type="string")],
+                gives=[FieldDef(name="y", type="string")],
+            ),
+            "alt_low": GeneContract(
+                name="alt_low", family=GeneFamily.CONFIGURATION,
+                risk=BlastRadius.LOW, does="low fitness alt",
+                takes=[FieldDef(name="x", type="string")],
+                gives=[FieldDef(name="y", type="string")],
+            ),
+            "alt_high": GeneContract(
+                name="alt_high", family=GeneFamily.CONFIGURATION,
+                risk=BlastRadius.LOW, does="high fitness alt",
+                takes=[FieldDef(name="x", type="string")],
+                gives=[FieldDef(name="y", type="string")],
+            ),
+        }
+
+        op = StepSubstitutionOperator()
+        steps = [StepSpec(step_type="locus", target="failing")]
+        ctx = _make_ctx(
+            steps=steps,
+            per_step_fitness={"failing": 0.1},
+            failure_distribution={"failing": 0.8},
+            gene_fitness_map={"failing": 0.1, "alt_low": 0.5, "alt_high": 0.9},
+            available_loci=["failing", "alt_low", "alt_high"],
+            contract_store=cs,
+        )
+        result = op.apply(ctx)
+        assert result is not None
+        assert result.new_steps[0].target == "alt_high"
+
     def test_no_substitution_without_compatible(self):
         from sg.parser.types import GeneContract, FieldDef, GeneFamily, BlastRadius
 
@@ -469,6 +533,31 @@ class TestReindexConditionals:
         ]
         result = _reindex_conditionals_after_delete(steps, 0)
         assert result[1].condition_step_index == 1
+
+    def test_delete_at_zero_reindexes(self):
+        """Delete step 0: conditional referencing step 1 → becomes 0."""
+        steps = [
+            StepSpec(
+                step_type="conditional", target="",
+                condition_step_index=1, condition_field="f",
+            ),
+        ]
+        result = _reindex_conditionals_after_delete(steps, 0)
+        assert result[0].condition_step_index == 0
+
+    def test_insert_at_end_reindexes(self):
+        """Insert at end: conditional referencing step before end → unchanged."""
+        steps = [
+            StepSpec(step_type="locus", target="x"),
+            StepSpec(
+                step_type="conditional", target="",
+                condition_step_index=0, condition_field="f",
+            ),
+        ]
+        # Insert at index 2 (after everything)
+        result = _reindex_conditionals_after_insert(steps, 2)
+        # condition_step_index=0 < insert_idx=2, so unchanged
+        assert result[1].condition_step_index == 0
 
     def test_insert_reindexes(self):
         steps = [

@@ -45,7 +45,12 @@ class TestFeedbackTimescaleOverride:
         return tmp_path
 
     def _make_orch(self, project_root):
+        from sg.parser.types import GeneFamily
         contract_store = ContractStore.open(project_root / "contracts")
+        for locus in contract_store.known_loci():
+            gc = contract_store.get_gene(locus)
+            if gc and gc.family == GeneFamily.CONFIGURATION and gc.verify_within:
+                gc.verify_within = "0.01s"
         registry = Registry.open(project_root / ".sg" / "registry")
         phenotype = PhenotypeMap.load(project_root / "phenotype.toml")
         fusion_tracker = FusionTracker.open(project_root / "fusion_tracker.json")
@@ -60,6 +65,10 @@ class TestFeedbackTimescaleOverride:
             contract_store=contract_store,
             project_root=project_root,
         )
+
+    def teardown_method(self):
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
 
     def test_default_timescale_is_convergence(self, project):
         """Without override, feedback uses contract's declared timescale."""

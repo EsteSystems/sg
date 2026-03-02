@@ -103,8 +103,14 @@ class TestVerifyScheduling:
         phenotype.save(tmp_path / "phenotype.toml")
         return tmp_path
 
-    def _make_orch(self, project_root):
+    def _make_orch(self, project_root, fast_verify=True):
+        from sg.parser.types import GeneFamily
         contract_store = ContractStore.open(project_root / "contracts")
+        if fast_verify:
+            for locus in contract_store.known_loci():
+                gc = contract_store.get_gene(locus)
+                if gc and gc.family == GeneFamily.CONFIGURATION and gc.verify_within:
+                    gc.verify_within = "0.01s"
         registry = Registry.open(project_root / ".sg" / "registry")
         phenotype = PhenotypeMap.load(project_root / "phenotype.toml")
         fusion_tracker = FusionTracker.open(project_root / "fusion_tracker.json")
@@ -119,6 +125,10 @@ class TestVerifyScheduling:
             contract_store=contract_store,
             project_root=project_root,
         )
+
+    def teardown_method(self):
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
 
     def test_verify_fires_after_config_gene(self, project):
         """Config gene success schedules and fires verify diagnostic."""
@@ -183,7 +193,7 @@ class TestVerifyScheduling:
         """Verify diagnostic respects the within delay."""
         orch = self._make_orch(project)
 
-        # Patch bridge_stp's verify_within to a small delay
+        # Patch bridge_stp's verify_within to a small but measurable delay
         gene_contract = orch.contract_store.get_gene("bridge_stp")
         original_within = gene_contract.verify_within
         gene_contract.verify_within = "0.2s"
@@ -221,6 +231,7 @@ class TestVerifyScheduling:
             assert diag_allele.total_invocations > invocations_before
         finally:
             gene_contract.verify_within = original_within
+            orch.verify_scheduler.cancel_all()
 
     def test_bridge_stp_verify_param_name(self, project):
         """bridge_stp.sg verify uses 'interface' (matching check_link_state takes)."""

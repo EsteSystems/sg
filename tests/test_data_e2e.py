@@ -8,7 +8,8 @@ import shutil
 import pytest
 from pathlib import Path
 
-import sg_data
+sg_data = pytest.importorskip("sg_data", reason="sg_data plugin not installed")
+
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker, FUSION_THRESHOLD
 from sg_data import MockDataKernel

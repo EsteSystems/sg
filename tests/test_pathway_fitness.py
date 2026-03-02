@@ -263,6 +263,44 @@ class TestPathwayFitnessTracker:
         avg = tracker.get_record("pw1").avg_execution_time_ms
         assert avg == pytest.approx(90.0)  # 0.9 * 100 + 0.1 * 0
 
+    def test_anomaly_at_exactly_threshold_not_detected(self):
+        """Exactly 2.0x ratio uses >, so 2.0 should NOT be anomaly."""
+        from sg.pathway_fitness import ANOMALY_THRESHOLD
+        tracker = PathwayFitnessTracker()
+        # 10 normal executions at 10ms
+        for _ in range(10):
+            tracker.record_execution(
+                "pw1", ["s1"], {"s1": 10.0}, True, None, '{}',
+            )
+        # One execution at exactly 2x average — ratio = 20.0/10.0 = 2.0
+        tracker.record_execution(
+            "pw1", ["s1"], {"s1": 20.0}, True, None, '{}',
+        )
+        anomalies = tracker.get_timing_anomalies("pw1")
+        assert len(anomalies) == 0  # exactly 2.0 not > 2.0
+
+    def test_execution_window_at_max(self):
+        """At exactly MAX_EXECUTION_WINDOW, adding one more trims oldest."""
+        from sg.pathway_fitness import MAX_EXECUTION_WINDOW
+        tracker = PathwayFitnessTracker()
+        # Fill to exactly MAX
+        for _ in range(MAX_EXECUTION_WINDOW):
+            tracker.record_execution("pw1", [], {}, True, None, '{}')
+        rec = tracker.get_record("pw1")
+        assert len(rec._recent_outcomes) == MAX_EXECUTION_WINDOW
+        # One more
+        tracker.record_execution("pw1", [], {}, False, "s", '{}')
+        assert len(rec._recent_outcomes) == MAX_EXECUTION_WINDOW
+
+    def test_single_timing_no_anomaly(self):
+        """Only 1 timing entry → no anomaly possible (needs >= 2)."""
+        tracker = PathwayFitnessTracker()
+        tracker.record_execution(
+            "pw1", ["s1"], {"s1": 1000.0}, True, None, '{}',
+        )
+        anomalies = tracker.get_timing_anomalies("pw1")
+        assert len(anomalies) == 0
+
     def test_timing_anomaly_to_dict(self):
         a = TimingAnomaly(step_name="s1", latest_ms=50.0, avg_ms=10.0, ratio=5.0)
         d = a.to_dict()

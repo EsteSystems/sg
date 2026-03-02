@@ -32,12 +32,19 @@ class PathwayFusionConfig:
     composition_fingerprint: str | None = None
 
 
+@dataclass
+class PathwayAlleleConfig:
+    dominant: str | None = None
+    fallback: list[str] = field(default_factory=list)
+
+
 class PhenotypeMap:
     """In-memory representation of the phenotype TOML."""
 
     def __init__(self) -> None:
         self.loci: dict[str, LocusConfig] = {}
         self.pathway_fusions: dict[str, PathwayFusionConfig] = {}
+        self.pathway_alleles: dict[str, PathwayAlleleConfig] = {}
 
     def ensure_locus(self, locus: str) -> LocusConfig:
         if locus not in self.loci:
@@ -93,6 +100,43 @@ class PhenotypeMap:
     def clear_fused(self, pathway: str) -> None:
         self.pathway_fusions.pop(pathway, None)
 
+    # --- Pathway alleles ---
+
+    def ensure_pathway_allele(self, pathway_name: str) -> PathwayAlleleConfig:
+        if pathway_name not in self.pathway_alleles:
+            self.pathway_alleles[pathway_name] = PathwayAlleleConfig()
+        return self.pathway_alleles[pathway_name]
+
+    def promote_pathway(self, pathway_name: str, sha: str) -> None:
+        """Set sha as dominant pathway allele. Old dominant goes to fallback head."""
+        config = self.ensure_pathway_allele(pathway_name)
+        if config.dominant is not None and config.dominant != sha:
+            if config.dominant not in config.fallback:
+                config.fallback.insert(0, config.dominant)
+        config.dominant = sha
+        if sha in config.fallback:
+            config.fallback.remove(sha)
+
+    def add_pathway_fallback(self, pathway_name: str, sha: str) -> None:
+        config = self.ensure_pathway_allele(pathway_name)
+        if sha != config.dominant and sha not in config.fallback:
+            config.fallback.append(sha)
+
+    def get_pathway_stack(self, pathway_name: str) -> list[str]:
+        """Return [dominant, ...fallback] pathway allele SHAs."""
+        config = self.pathway_alleles.get(pathway_name)
+        if config is None:
+            return []
+        stack = []
+        if config.dominant:
+            stack.append(config.dominant)
+        stack.extend(config.fallback)
+        return stack
+
+    def get_pathway_dominant(self, pathway_name: str) -> str | None:
+        config = self.pathway_alleles.get(pathway_name)
+        return config.dominant if config else None
+
     # --- Persistence ---
 
     def save(self, path: Path) -> None:
@@ -113,6 +157,14 @@ class PhenotypeMap:
             if fusion.composition_fingerprint:
                 entry["composition_fingerprint"] = fusion.composition_fingerprint
             data["pathway_fusion"][key] = entry
+        data["pathway_allele"] = {}
+        for key, config in self.pathway_alleles.items():
+            entry = {}
+            if config.dominant:
+                entry["dominant"] = config.dominant
+            if config.fallback:
+                entry["fallback"] = config.fallback
+            data["pathway_allele"][key] = entry
         with file_lock(path):
             path.write_bytes(tomli_w.dumps(data).encode())
 
@@ -133,5 +185,10 @@ class PhenotypeMap:
                 fused_sha=entry.get("fused_sha"),
                 fused_fallback=entry.get("fused_fallback"),
                 composition_fingerprint=entry.get("composition_fingerprint"),
+            )
+        for key, entry in data.get("pathway_allele", {}).items():
+            pm.pathway_alleles[key] = PathwayAlleleConfig(
+                dominant=entry.get("dominant"),
+                fallback=entry.get("fallback", []),
             )
         return pm

@@ -26,6 +26,8 @@ from sg.registry import Registry
 from sg.safety import Transaction, SafeKernel, requires_transaction, is_shadow_only, SHADOW_PROMOTION_THRESHOLD
 from sg.decomposition import DecompositionDetector
 from sg.pathway_fitness import PathwayFitnessTracker
+from sg.pathway_registry import PathwayRegistry, steps_from_pathway, compute_structure_sha
+from sg import pathway_arena
 from sg.regression import RegressionDetector
 from sg.verify import VerifyScheduler, parse_duration
 
@@ -45,6 +47,7 @@ class Orchestrator:
         project_root: Path,
         audit_log: AuditLog | None = None,
         pathway_fitness_tracker: PathwayFitnessTracker | None = None,
+        pathway_registry: PathwayRegistry | None = None,
     ):
         self.registry = registry
         self.phenotype = phenotype
@@ -55,6 +58,7 @@ class Orchestrator:
         self.project_root = project_root
         self.audit_log = audit_log
         self.pathway_fitness_tracker = pathway_fitness_tracker
+        self.pathway_registry = pathway_registry
         self.verify_scheduler = VerifyScheduler()
         self._regression_path = project_root / ".sg" / "regression.json"
         self.regression_detector = RegressionDetector.open(self._regression_path)
@@ -603,15 +607,47 @@ class Orchestrator:
     def _run_pathway_inner(self, pathway_name: str, input_json: str) -> list[str]:
         pathway_contract = self.contract_store.get_pathway(pathway_name)
         if pathway_contract is not None:
-            pathway = pathway_from_contract(pathway_contract)
+            default_pathway = pathway_from_contract(pathway_contract)
             on_failure = pathway_contract.on_failure
         else:
             raise ValueError(f"unknown pathway: {pathway_name}")
 
+        # Register structural allele if pathway registry is active
+        if self.pathway_registry is not None:
+            steps = steps_from_pathway(default_pathway)
+            sha = self.pathway_registry.register(pathway_name, steps)
+            if not self.phenotype.get_pathway_stack(pathway_name):
+                self.phenotype.add_pathway_fallback(pathway_name, sha)
+                self.phenotype.promote_pathway(pathway_name, sha)
+                pw_allele = self.pathway_registry.get(sha)
+                if pw_allele:
+                    pw_allele.state = "dominant"
+
+        # Use pathway allele stack if registry active
+        allele_stack = (
+            self.phenotype.get_pathway_stack(pathway_name)
+            if self.pathway_registry else []
+        )
+        if allele_stack and self.pathway_registry:
+            return self._execute_pathway_allele_stack(
+                pathway_name, input_json, allele_stack,
+                on_failure, default_pathway,
+            )
+        return self._execute_single_pathway(
+            default_pathway, pathway_name, input_json, on_failure,
+        )
+
+    def _execute_single_pathway(
+        self,
+        pathway: Pathway,
+        pathway_name: str,
+        input_json: str,
+        on_failure: str,
+    ) -> list[str]:
+        """Execute a single pathway structure."""
         logger.info("Executing pathway: %s", pathway_name,
                     extra={"pathway": pathway_name})
 
-        # Snapshot tracked resources before pathway starts
         resources_before = set(self.kernel.tracked_resources())
 
         try:
@@ -630,6 +666,92 @@ class Orchestrator:
         logger.info("Pathway '%s' completed with %d output(s)",
                     pathway_name, len(outputs), extra={"pathway": pathway_name})
         return outputs
+
+    def _execute_pathway_allele_stack(
+        self,
+        pathway_name: str,
+        input_json: str,
+        allele_stack: list[str],
+        on_failure: str,
+        default_pathway: Pathway,
+    ) -> list[str]:
+        """Try each pathway allele in the stack, recording success/failure."""
+        last_error = ""
+        for sha in allele_stack:
+            pw_allele = self.pathway_registry.get(sha)
+            if pw_allele is None or pw_allele.state == "deprecated":
+                continue
+
+            pathway = self._pathway_from_allele(pw_allele, default_pathway)
+
+            try:
+                outputs = self._execute_single_pathway(
+                    pathway, pathway_name, input_json, on_failure,
+                )
+                pathway_arena.record_pathway_success(pw_allele)
+                self._check_pathway_promotion(pathway_name, sha)
+                return outputs
+            except RuntimeError as e:
+                last_error = str(e)
+                pathway_arena.record_pathway_failure(pw_allele)
+                self._check_pathway_demotion(pathway_name, sha)
+                logger.warning(
+                    "pathway allele %s failed for '%s': %s",
+                    sha[:12], pathway_name, e,
+                    extra={"pathway": pathway_name, "sha": sha[:12]},
+                )
+                continue
+
+        raise RuntimeError(
+            f"pathway '{pathway_name}' failed: all pathway alleles exhausted"
+        )
+
+    def _pathway_from_allele(
+        self, pw_allele: 'PathwayAllele', default_pathway: Pathway,
+    ) -> Pathway:
+        """Convert a PathwayAllele back to a runtime Pathway.
+
+        For the contract-derived allele, returns the default directly.
+        For mutated alleles (Phase 5), will reconstruct from StepSpec.
+        """
+        default_steps = steps_from_pathway(default_pathway)
+        default_sha = compute_structure_sha(default_steps)
+        if pw_allele.structure_sha == default_sha:
+            return default_pathway
+        logger.warning("pathway allele %s has non-default structure, "
+                       "using default pathway", pw_allele.structure_sha[:12])
+        return default_pathway
+
+    def _check_pathway_promotion(self, pathway_name: str, sha: str) -> None:
+        if self.pathway_registry is None:
+            return
+        allele = self.pathway_registry.get(sha)
+        dominant_sha = self.phenotype.get_pathway_dominant(pathway_name)
+        dominant = self.pathway_registry.get(dominant_sha) if dominant_sha else None
+
+        if allele and pathway_arena.should_promote_pathway(allele, dominant):
+            pathway_arena.set_pathway_dominant(allele)
+            if dominant:
+                pathway_arena.set_pathway_recessive(dominant)
+            self.phenotype.promote_pathway(pathway_name, sha)
+            logger.info("promoted pathway allele %s for %s",
+                        sha[:12], pathway_name,
+                        extra={"pathway": pathway_name, "sha": sha[:12],
+                               "event": "pathway_promotion"})
+            self._audit("pathway_promotion", locus=pathway_name, sha=sha,
+                        fitness=pathway_arena.compute_pathway_fitness(allele))
+
+    def _check_pathway_demotion(self, pathway_name: str, sha: str) -> None:
+        if self.pathway_registry is None:
+            return
+        allele = self.pathway_registry.get(sha)
+        if allele and pathway_arena.should_demote_pathway(allele):
+            pathway_arena.set_pathway_deprecated(allele)
+            logger.info("demoted pathway allele %s for %s (5 consecutive failures)",
+                        sha[:12], pathway_name,
+                        extra={"pathway": pathway_name, "sha": sha[:12],
+                               "event": "pathway_demotion"})
+            self._audit("pathway_demotion", locus=pathway_name, sha=sha)
 
     def _rollback_pathway_resources(
         self, resources_before: set[tuple[str, str]]
@@ -674,4 +796,6 @@ class Orchestrator:
         if self.pathway_fitness_tracker is not None:
             fitness_path = self.project_root / "pathway_fitness.json"
             self.pathway_fitness_tracker.save(fitness_path)
+        if self.pathway_registry is not None:
+            self.pathway_registry.save_index()
         self.decomposition_detector.save(self._decomposition_path)

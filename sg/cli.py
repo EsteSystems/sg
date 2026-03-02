@@ -17,6 +17,7 @@ from sg.decomposition import DecompositionDetector
 from sg.pathway_fitness import PathwayFitnessTracker
 from sg.mutation import MockMutationEngine, MutationEngine
 from sg.orchestrator import Orchestrator
+from sg.pathway_registry import PathwayRegistry, steps_from_pathway
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
@@ -109,6 +110,7 @@ def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
     pathway_fitness_tracker = PathwayFitnessTracker.open(root / "pathway_fitness.json")
     kernel = make_kernel(args)
     mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
+    pathway_registry = PathwayRegistry.open(root / ".sg" / "pathway_registry")
 
     return Orchestrator(
         registry=registry,
@@ -119,6 +121,7 @@ def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
         contract_store=contract_store,
         project_root=root,
         pathway_fitness_tracker=pathway_fitness_tracker,
+        pathway_registry=pathway_registry,
     )
 
 
@@ -209,6 +212,27 @@ def cmd_init(args: argparse.Namespace) -> None:
             registry.save_index()
             phenotype.save(root / "phenotype.toml")
         print(f"Seeded {pool_seeded} locus/loci from pool '{seed_pool}'")
+
+    # Register initial pathway alleles
+    pathway_reg = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+    pw_count = 0
+    for pw_name in contract_store.known_pathways():
+        pathway_contract = contract_store.get_pathway(pw_name)
+        if pathway_contract is None:
+            continue
+        from sg.pathway import build_pathway
+        pathway = build_pathway(pathway_contract, contract_store)
+        steps = steps_from_pathway(pathway)
+        sha = pathway_reg.register(pw_name, steps)
+        pw_allele = pathway_reg.get(sha)
+        if pw_allele and pw_allele.state != "dominant":
+            pw_allele.state = "dominant"
+        phenotype.promote_pathway(pw_name, sha)
+        pw_count += 1
+    if pw_count:
+        pathway_reg.save_index()
+        phenotype.save(root / "phenotype.toml")
+        print(f"  registered {pw_count} pathway allele(s)")
 
     print("Genome initialized.")
 
@@ -400,6 +424,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
     pathway_fitness_tracker = PathwayFitnessTracker.open(root / "pathway_fitness.json")
     decomposition_detector = DecompositionDetector.open(root / ".sg" / "decomposition.json")
+    pathway_registry = PathwayRegistry.open(root / ".sg" / "pathway_registry")
 
     print("=== Software Genome Status ===\n")
 
@@ -427,7 +452,12 @@ def cmd_status(args: argparse.Namespace) -> None:
         fusion_config = phenotype.get_fused(name)
         track = fusion_tracker.get_track(name)
         fitness_rec = pathway_fitness_tracker.get_record(name)
+        pw_alleles = pathway_registry.get_for_pathway(name)
+        pw_dominant_sha = phenotype.get_pathway_dominant(name)
         print(f"Pathway: {name}")
+        if pw_alleles:
+            print(f"  Pathway alleles: {len(pw_alleles)}"
+                  f"  dominant={pw_dominant_sha[:12] if pw_dominant_sha else 'none'}")
         if fusion_config and fusion_config.fused_sha:
             print(f"  Fused: {fusion_config.fused_sha[:12]}")
         else:
@@ -459,12 +489,19 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_lineage(args: argparse.Namespace) -> None:
-    """Show mutation ancestry for a locus."""
+    """Show mutation ancestry for a locus or pathway."""
+    if getattr(args, "pathway", False):
+        return _cmd_pathway_lineage(args)
+
     root = get_project_root()
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
 
     locus = args.locus
+    if not locus:
+        print("error: locus name required (or use --pathway)", file=sys.stderr)
+        return
+
     alleles = registry.alleles_for_locus(locus)
     if not alleles:
         print(f"No alleles registered for locus '{locus}'")
@@ -495,6 +532,67 @@ def cmd_lineage(args: argparse.Namespace) -> None:
 
     for root_allele in roots:
         _print_allele(root_allele)
+    print()
+
+
+def _cmd_pathway_lineage(args: argparse.Namespace) -> None:
+    """Show structural ancestry for a pathway's alleles."""
+    root = get_project_root()
+    pathway_registry = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+
+    pw_name = args.locus
+    if not pw_name:
+        # Show all pathways with alleles
+        all_pathways = set()
+        for allele in pathway_registry.alleles.values():
+            all_pathways.add(allele.pathway_name)
+        if not all_pathways:
+            print("No pathway alleles registered")
+            return
+        for name in sorted(all_pathways):
+            alleles = pathway_registry.get_for_pathway(name)
+            dominant = phenotype.get_pathway_dominant(name)
+            print(f"{name}: {len(alleles)} allele(s)"
+                  f"  dominant={dominant[:12] if dominant else 'none'}")
+        return
+
+    alleles = pathway_registry.get_for_pathway(pw_name)
+    if not alleles:
+        print(f"No pathway alleles registered for '{pw_name}'")
+        return
+
+    dominant_sha = phenotype.get_pathway_dominant(pw_name)
+
+    # Build parent→children map
+    children: dict[str | None, list] = {}
+    for a in alleles:
+        children.setdefault(a.parent_sha, []).append(a)
+
+    sha_set = {a.structure_sha for a in alleles}
+    roots = [a for a in alleles if a.parent_sha is None or a.parent_sha not in sha_set]
+
+    print(f"=== Pathway Lineage: {pw_name} ({len(alleles)} allele(s)) ===\n")
+
+    from sg.pathway_arena import compute_pathway_fitness
+
+    def _print_pw_allele(a, indent=0):
+        fitness = compute_pathway_fitness(a)
+        marker = " <-- dominant" if a.structure_sha == dominant_sha else ""
+        op = f"  op={a.mutation_operator}" if a.mutation_operator else ""
+        prefix = "  " * indent + ("├── " if indent > 0 else "")
+        print(f"{prefix}{a.structure_sha[:12]}  "
+              f"fitness={fitness:.3f}  "
+              f"{a.successful_executions}ok/{a.failed_executions}fail  "
+              f"state={a.state}{op}{marker}")
+        steps_desc = ", ".join(f"{s.step_type}:{s.target}" for s in a.steps)
+        if steps_desc:
+            print(f"{'  ' * indent}{'    ' if indent > 0 else ''}  steps: [{steps_desc}]")
+        for child in children.get(a.structure_sha, []):
+            _print_pw_allele(child, indent + 1)
+
+    for root_allele in roots:
+        _print_pw_allele(root_allele)
     print()
 
 
@@ -1113,8 +1211,9 @@ def main() -> None:
 
     subparsers.add_parser("status", help="show genome status")
 
-    lineage_parser = subparsers.add_parser("lineage", help="show mutation ancestry for a locus")
-    lineage_parser.add_argument("locus", help="locus to show lineage for")
+    lineage_parser = subparsers.add_parser("lineage", help="show mutation ancestry for a locus or pathway")
+    lineage_parser.add_argument("locus", nargs="?", default=None, help="locus or pathway name")
+    lineage_parser.add_argument("--pathway", action="store_true", help="show pathway allele lineage")
 
     compete_parser = subparsers.add_parser("compete", help="run allele competition trials")
     compete_parser.add_argument("locus", help="locus to compete")

@@ -19,6 +19,7 @@ from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
 from sg.log import get_logger
 from sg.pathway_fitness import PathwayFitnessTracker
+from sg.pathway_registry import PathwayRegistry
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
@@ -39,12 +40,13 @@ def _load_state():
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
     pathway_fitness = PathwayFitnessTracker.open(root / "pathway_fitness.json")
-    return contract_store, registry, phenotype, fusion_tracker, pathway_fitness
+    pathway_registry = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+    return contract_store, registry, phenotype, fusion_tracker, pathway_fitness, pathway_registry
 
 
 @app.get("/api/status")
 def api_status():
-    cs, reg, pheno, ft, _pft = _load_state()
+    cs, reg, pheno, ft, _pft, _pr = _load_state()
     allele_count = len(reg.alleles)
     loci_count = len(cs.known_loci())
     pathway_count = len(cs.known_pathways())
@@ -67,7 +69,7 @@ def api_status():
 
 @app.get("/api/loci")
 def api_loci():
-    cs, reg, pheno, _, _ = _load_state()
+    cs, reg, pheno, _, _, _ = _load_state()
     result = []
     for locus in cs.known_loci():
         alleles = reg.alleles_for_locus(locus)
@@ -88,7 +90,7 @@ def api_loci():
 
 @app.get("/api/locus/{name}")
 def api_locus(name: str):
-    cs, reg, pheno, _, _ = _load_state()
+    cs, reg, pheno, _, _, _ = _load_state()
     alleles = reg.alleles_for_locus(name)
     dominant_sha = pheno.get_dominant(name)
 
@@ -122,12 +124,14 @@ def api_locus(name: str):
 
 @app.get("/api/pathways")
 def api_pathways():
-    cs, _, pheno, ft, pft = _load_state()
+    cs, _, pheno, ft, pft, pr = _load_state()
     result = []
     for name in cs.known_pathways():
         fusion = pheno.get_fused(name)
         track = ft.get_track(name)
         fitness_rec = pft.get_record(name)
+        pw_alleles = pr.get_for_pathway(name)
+        pw_dominant = pheno.get_pathway_dominant(name)
         result.append({
             "name": name,
             "fused": bool(fusion and fusion.fused_sha),
@@ -139,13 +143,15 @@ def api_pathways():
             "total_executions": fitness_rec.total_executions if fitness_rec else 0,
             "avg_time_ms": round(fitness_rec.avg_execution_time_ms, 1) if fitness_rec else 0,
             "consecutive_failures": fitness_rec.consecutive_failures if fitness_rec else 0,
+            "pathway_allele_count": len(pw_alleles),
+            "dominant_pathway_allele": pw_dominant[:12] if pw_dominant else None,
         })
     return result
 
 
 @app.get("/api/allele/{sha}/source")
 def api_allele_source(sha: str):
-    _, reg, _, _, _ = _load_state()
+    _, reg, _, _, _, _ = _load_state()
     # Try exact match first, then prefix
     source = reg.load_source(sha)
     if source is None:
@@ -161,7 +167,7 @@ def api_allele_source(sha: str):
 @app.get("/api/lineage/{sha}")
 def api_lineage(sha: str):
     """Return the lineage chain for an allele (child → parent → ...)."""
-    _, reg, _, _, _ = _load_state()
+    _, reg, _, _, _, _ = _load_state()
     # Resolve prefix
     full_sha = sha
     if sha not in reg.alleles:
@@ -213,7 +219,7 @@ def api_regression():
 @app.get("/api/pathway/{name}/fitness")
 def api_pathway_fitness(name: str):
     """Return detailed pathway fitness data."""
-    _, _, _, _, pft = _load_state()
+    _, _, _, _, pft, _ = _load_state()
     rec = pft.get_record(name)
     if rec is None:
         return {"pathway": name, "fitness": 0.0, "executions": 0}
@@ -234,6 +240,32 @@ def api_pathway_fitness(name: str):
     }
 
 
+@app.get("/api/pathway/{name}/lineage")
+def api_pathway_lineage(name: str):
+    """Return pathway allele lineage."""
+    _, _, pheno, _, _, pr = _load_state()
+    from sg.pathway_arena import compute_pathway_fitness
+    alleles = pr.get_for_pathway(name)
+    dominant_sha = pheno.get_pathway_dominant(name)
+    result = []
+    for a in alleles:
+        result.append({
+            "sha": a.structure_sha[:12],
+            "sha_full": a.structure_sha,
+            "pathway_name": a.pathway_name,
+            "fitness": round(compute_pathway_fitness(a), 3),
+            "state": a.state,
+            "total_executions": a.total_executions,
+            "successful_executions": a.successful_executions,
+            "failed_executions": a.failed_executions,
+            "parent_sha": a.parent_sha[:12] if a.parent_sha else None,
+            "mutation_operator": a.mutation_operator,
+            "is_dominant": a.structure_sha == dominant_sha,
+            "steps": [s.to_dict() for s in a.steps],
+        })
+    return {"pathway": name, "alleles": result}
+
+
 @app.get("/api/events")
 async def api_events():
     """SSE stream — yields update events when files change."""
@@ -246,7 +278,8 @@ async def api_events():
             for f in [root / "phenotype.toml",
                       root / ".sg" / "registry" / "registry.json",
                       root / "fusion_tracker.json",
-                      root / "pathway_fitness.json"]:
+                      root / "pathway_fitness.json",
+                      root / ".sg" / "pathway_registry" / "pathway_registry.json"]:
                 if f.exists():
                     current = max(current, f.stat().st_mtime)
             if current > last_mtime and last_mtime > 0:
@@ -264,7 +297,7 @@ async def api_events():
 async def federation_receive(request: Request):
     """Accept an allele from a peer with integrity verification."""
     data = await request.json()
-    _, reg, pheno, _, _ = _load_state()
+    _, reg, pheno, _, _, _ = _load_state()
     from sg.federation import import_allele, verify_allele_integrity
     if not verify_allele_integrity(data):
         return JSONResponse({"error": "integrity check failed"}, status_code=400)
@@ -286,7 +319,7 @@ async def federation_receive(request: Request):
 async def federation_fitness(request: Request):
     """Accept fitness observations from a peer for an allele."""
     data = await request.json()
-    _, reg, _, _, _ = _load_state()
+    _, reg, _, _, _, _ = _load_state()
     sha = data.get("sha256", "")
     peer_name = data.get("peer", "unknown")
 
@@ -310,7 +343,7 @@ async def federation_fitness(request: Request):
 @app.get("/api/federation/alleles/{locus}")
 def federation_alleles(locus: str):
     """Serve alleles for a locus to a peer."""
-    _, reg, _, _, _ = _load_state()
+    _, reg, _, _, _, _ = _load_state()
     from sg.federation import export_allele
     alleles = reg.alleles_for_locus(locus)
     result = []
@@ -359,7 +392,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </tr></thead><tbody></tbody></table>
 <h2>Pathways</h2>
 <table id="pathways-table"><thead><tr>
-  <th>Pathway</th><th>Fitness</th><th>Fused</th><th>Reinforcement</th><th>Successes</th><th>Failures</th><th>Avg Time</th>
+  <th>Pathway</th><th>Fitness</th><th>Alleles</th><th>Fused</th><th>Reinforcement</th><th>Successes</th><th>Failures</th><th>Avg Time</th>
 </tr></thead><tbody></tbody></table>
 <h2>Regression Monitor</h2>
 <table id="regression-table"><thead><tr>
@@ -387,7 +420,9 @@ async function load() {
 
   const pw = await (await fetch('/api/pathways')).json();
   document.querySelector('#pathways-table tbody').innerHTML = pw.map(p =>
-    `<tr><td>${p.name}</td><td>${p.fitness.toFixed(3)}</td><td>${p.fused?p.fused_sha:'no'}</td>` +
+    `<tr><td>${p.name}</td><td>${p.fitness.toFixed(3)}</td>` +
+    `<td>${p.pathway_allele_count} ${p.dominant_pathway_allele?'('+p.dominant_pathway_allele+')':''}</td>` +
+    `<td>${p.fused?p.fused_sha:'no'}</td>` +
     `<td>${p.reinforcement_count}/10</td><td>${p.total_successes}</td><td>${p.total_failures}</td>` +
     `<td>${p.avg_time_ms}ms</td></tr>`
   ).join('');

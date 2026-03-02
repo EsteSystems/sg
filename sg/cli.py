@@ -13,6 +13,7 @@ from sg.log import configure_logging
 from sg.contracts import ContractStore, validate_output
 from sg.fusion import FusionTracker
 from sg.kernel.discovery import load_kernel, list_kernel_names, KernelNotFoundError, KernelLoadError
+from sg.decomposition import DecompositionDetector
 from sg.pathway_fitness import PathwayFitnessTracker
 from sg.mutation import MockMutationEngine, MutationEngine
 from sg.orchestrator import Orchestrator
@@ -398,6 +399,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
     pathway_fitness_tracker = PathwayFitnessTracker.open(root / "pathway_fitness.json")
+    decomposition_detector = DecompositionDetector.open(root / ".sg" / "decomposition.json")
 
     print("=== Software Genome Status ===\n")
 
@@ -406,6 +408,12 @@ def cmd_status(args: argparse.Namespace) -> None:
         dominant_sha = phenotype.get_dominant(locus)
         print(f"Locus: {locus}")
         print(f"  Dominant: {dominant_sha[:12] if dominant_sha else 'none'}")
+        if decomposition_detector.is_decomposed(locus):
+            state = decomposition_detector.get_decomposition(locus)
+            print(f"  Decomposed: -> pathway '{state['pathway_name']}'")
+            print(f"    Sub-loci: {', '.join(state['sub_loci'])}")
+            if state.get("status") == "refined":
+                print(f"    Status: re-fused ({state['fused_sha'][:12]})")
         print(f"  Alleles ({len(alleles)}):")
         for a in alleles:
             fitness = arena.compute_fitness(a)

@@ -24,6 +24,7 @@ from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contr
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 from sg.safety import Transaction, SafeKernel, requires_transaction, is_shadow_only, SHADOW_PROMOTION_THRESHOLD
+from sg.decomposition import DecompositionDetector
 from sg.pathway_fitness import PathwayFitnessTracker
 from sg.regression import RegressionDetector
 from sg.verify import VerifyScheduler, parse_duration
@@ -57,6 +58,8 @@ class Orchestrator:
         self.verify_scheduler = VerifyScheduler()
         self._regression_path = project_root / ".sg" / "regression.json"
         self.regression_detector = RegressionDetector.open(self._regression_path)
+        self._decomposition_path = project_root / ".sg" / "decomposition.json"
+        self.decomposition_detector = DecompositionDetector.open(self._decomposition_path)
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
         self._current_pathway_context: str | None = None
 
@@ -135,6 +138,7 @@ class Orchestrator:
                         logger.info("rolled back %d action(s)",
                                     len(rolled), extra={"locus": locus})
                 last_error = str(e)
+                self.decomposition_detector.record_error(locus, sha, last_error)
                 arena.record_failure(allele)
                 self._check_demotion(locus, sha)
                 logger.warning("failed via %s: %s", sha[:12], e,
@@ -143,6 +147,15 @@ class Orchestrator:
 
         logger.info("all alleles exhausted, triggering mutation...",
                     extra={"locus": locus})
+
+        # Try decomposition if error diversity warrants it
+        if not self.decomposition_detector.is_decomposed(locus):
+            signal = self.decomposition_detector.analyze(locus)
+            if signal is not None:
+                decomposed = self._try_decomposition(locus, input_json, signal)
+                if decomposed is not None:
+                    return decomposed
+
         mutated = self._try_mutation(locus, input_json, last_error)
         if mutated is not None:
             return mutated
@@ -311,6 +324,78 @@ class Orchestrator:
         self._audit("mutation_success", locus=locus, sha=sha,
                     candidates_tested=len(candidates))
         return first_passing
+
+    def _try_decomposition(
+        self, locus: str, input_json: str, signal: 'DecompositionSignal',
+    ) -> tuple[str, str] | None:
+        """Attempt to decompose a gene into a pathway of sub-genes."""
+        try:
+            return self._try_decomposition_inner(locus, input_json, signal)
+        except Exception as e:
+            logger.warning("decomposition failed for %s: %s, falling back",
+                           locus, e, extra={"locus": locus})
+            return None
+
+    def _try_decomposition_inner(
+        self, locus: str, input_json: str, signal: 'DecompositionSignal',
+    ) -> tuple[str, str] | None:
+        from sg.decomposition import DecompositionResult
+
+        dominant_sha = self.phenotype.get_dominant(locus)
+        gene_source = ""
+        if dominant_sha:
+            gene_source = self.registry.load_source(dominant_sha) or ""
+
+        contract_source = ""
+        gene_contract = self.contract_store.get_gene(locus)
+        if gene_contract and gene_contract.does:
+            contract_source = gene_contract.does
+
+        result: DecompositionResult = self.mutation_engine.decompose(
+            locus, gene_source, signal.error_clusters,
+            contract_source, signal.recommended_split_count,
+        )
+
+        # Register sub-gene contracts and seed alleles
+        contracts_dir = self.project_root / "contracts"
+        sub_loci = []
+        for i, (contract_src, seed_src) in enumerate(
+            zip(result.sub_gene_contract_sources, result.sub_gene_seed_sources)
+        ):
+            sub_locus = f"{locus}_sub{i + 1}"
+            sub_loci.append(sub_locus)
+            contract_path = contracts_dir / "genes" / f"{sub_locus}.sg"
+            self.contract_store.register_contract(contract_src, contract_path)
+            sha = self.registry.register(seed_src, sub_locus, 0, None)
+            self.phenotype.add_to_fallback(sub_locus, sha)
+            self.phenotype.promote(sub_locus, sha)
+
+        # Register pathway contract
+        pathway_name = f"{locus}_decomposed"
+        pathway_path = contracts_dir / "pathways" / f"{pathway_name}.sg"
+        self.contract_store.register_contract(result.pathway_contract_source, pathway_path)
+
+        # Record decomposition state
+        self.decomposition_detector.record_decomposition(locus, pathway_name, sub_loci)
+
+        self._audit("decomposition", locus=locus,
+                    pathway=pathway_name, sub_loci=sub_loci,
+                    cluster_count=len(signal.error_clusters))
+
+        logger.info("decomposed %s into pathway '%s' with %d sub-genes",
+                    locus, pathway_name, len(sub_loci),
+                    extra={"locus": locus, "event": "decomposition"})
+
+        # Try executing the new pathway
+        try:
+            outputs = self.run_pathway(pathway_name, input_json)
+            if outputs:
+                return (outputs[-1], f"decomposed:{pathway_name}")
+        except Exception as e:
+            logger.warning("decomposed pathway %s failed on first run: %s",
+                           pathway_name, e, extra={"locus": locus})
+
+        return None
 
     def _check_promotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)
@@ -589,3 +674,4 @@ class Orchestrator:
         if self.pathway_fitness_tracker is not None:
             fitness_path = self.project_root / "pathway_fitness.json"
             self.pathway_fitness_tracker.save(fitness_path)
+        self.decomposition_detector.save(self._decomposition_path)

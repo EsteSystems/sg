@@ -71,6 +71,16 @@ class MutationEngine(ABC):
         """Generate a new .sg contract from context. Returns raw .sg source."""
         raise NotImplementedError("this engine does not support contract generation")
 
+    def decompose(self, locus: str, gene_source: str,
+                  error_clusters: list, contract_source: str,
+                  split_count: int) -> 'DecompositionResult':
+        """Decompose a gene into a pathway with sub-genes.
+
+        Returns a DecompositionResult with pathway contract, sub-gene contracts,
+        and sub-gene seed sources.
+        """
+        raise NotImplementedError("this engine does not support decomposition")
+
 
 class MockMutationEngine(MutationEngine):
     """Loads fixture files as mutation results. For development/testing."""
@@ -108,6 +118,31 @@ class MockMutationEngine(MutationEngine):
         if not fixture_path.exists():
             raise FileNotFoundError(f"no contract generation fixture at {fixture_path}")
         return fixture_path.read_text()
+
+    def decompose(self, locus: str, gene_source: str,
+                  error_clusters: list, contract_source: str,
+                  split_count: int) -> 'DecompositionResult':
+        from sg.decomposition import DecompositionResult
+        pathway_path = self.fixtures_dir / f"{locus}_decompose_pathway.sg"
+        if not pathway_path.exists():
+            raise FileNotFoundError(f"no decomposition fixture at {pathway_path}")
+        sub_contracts = []
+        sub_seeds = []
+        for i in range(1, split_count + 1):
+            cp = self.fixtures_dir / f"{locus}_sub{i}.sg"
+            sp = self.fixtures_dir / f"{locus}_sub{i}.py"
+            if not cp.exists():
+                raise FileNotFoundError(f"no sub-gene contract fixture at {cp}")
+            if not sp.exists():
+                raise FileNotFoundError(f"no sub-gene seed fixture at {sp}")
+            sub_contracts.append(cp.read_text())
+            sub_seeds.append(sp.read_text())
+        return DecompositionResult(
+            pathway_contract_source=pathway_path.read_text(),
+            sub_gene_contract_sources=sub_contracts,
+            sub_gene_seed_sources=sub_seeds,
+            original_locus=locus,
+        )
 
 
 class LLMMutationEngine(MutationEngine):
@@ -425,6 +460,92 @@ Write a new gene contract in .sg format. The contract must:
 
 Return ONLY the .sg contract text, no markdown fences."""
         return self._call_api(prompt).strip()
+
+    def decompose(self, locus: str, gene_source: str,
+                  error_clusters: list, contract_source: str,
+                  split_count: int) -> 'DecompositionResult':
+        from sg.decomposition import DecompositionResult
+        system_ctx = self._system_context()
+        clusters_desc = []
+        for ec in error_clusters:
+            examples = "\n".join(f"    - {m}" for m in ec.representative_messages[:3])
+            clusters_desc.append(f"  Pattern: {ec.pattern} ({ec.count} occurrences)\n{examples}")
+        clusters_text = "\n".join(clusters_desc)
+
+        prompt = f"""You are a gene decomposition engine for the Software Genomics runtime.
+
+{system_ctx}
+
+A gene that fails for qualitatively different reasons should be decomposed into
+a pathway of focused sub-genes, each handling one concern.
+
+## Original gene locus: {locus}
+
+## Contract:
+{contract_source}
+
+## Current gene source (failing for multiple reasons):
+```python
+{gene_source}
+```
+
+## Error clusters (distinct failure patterns):
+{clusters_text}
+
+## Task
+Decompose this gene into {split_count} focused sub-genes composed by a pathway.
+Each sub-gene should handle one category of the error patterns above.
+
+Structure your response with these exact section markers:
+
+===PATHWAY===
+The pathway contract in .sg format (pathway <name>, steps with ->)
+
+===GENE_CONTRACT===
+The .sg contract for sub-gene 1
+
+===GENE_SEED===
+The Python source for sub-gene 1
+
+===GENE_CONTRACT===
+The .sg contract for sub-gene 2
+
+===GENE_SEED===
+The Python source for sub-gene 2
+
+(repeat for each sub-gene)
+
+Each sub-gene must define `execute(input_json: str) -> str` and use `gene_sdk`."""
+        text = self._call_api(prompt)
+
+        # Parse structured response
+        parts = re.split(r"===(\w+)===", text)
+        pathway_source = None
+        sub_contracts = []
+        sub_seeds = []
+        i = 1
+        while i < len(parts):
+            marker = parts[i].strip()
+            content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            if marker == "PATHWAY":
+                pathway_source = content
+            elif marker == "GENE_CONTRACT":
+                sub_contracts.append(content)
+            elif marker == "GENE_SEED":
+                sub_seeds.append(self._extract_python(content))
+            i += 2
+
+        if pathway_source is None:
+            raise RuntimeError("LLM decomposition response missing ===PATHWAY=== section")
+        if not sub_contracts or not sub_seeds:
+            raise RuntimeError("LLM decomposition response missing sub-gene sections")
+
+        return DecompositionResult(
+            pathway_contract_source=pathway_source,
+            sub_gene_contract_sources=sub_contracts,
+            sub_gene_seed_sources=sub_seeds,
+            original_locus=locus,
+        )
 
 
 class ClaudeMutationEngine(LLMMutationEngine):

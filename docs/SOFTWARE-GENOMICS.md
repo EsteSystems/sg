@@ -59,7 +59,7 @@ def execute(input_json: str) -> str:
     return json.dumps({"success": True, "bridge": result})
 ```
 
-The gene has access to a `gene_sdk` — a kernel interface that provides the operations genes need to interact with the environment. In development, the kernel is simulated. In production, it wraps real system calls (NetworkManager D-Bus, `ip link`, sysfs). The gene doesn't know which kernel it's running against. The contract is the same.
+The gene has access to a `gene_sdk` — a kernel interface that provides the operations genes need to interact with the environment. The kernel is domain-specific: a network kernel wraps bridge and VLAN operations, a data kernel wraps database and HTTP operations, and so on. Domain plugins provide kernel implementations discovered via entry points. In development, the kernel is a mock (in-memory simulation). In production, it wraps real system calls. The gene doesn't know which kernel it's running against. The contract is the same.
 
 ### Locus
 
@@ -615,7 +615,7 @@ Every configuration gene execution is wrapped in a transaction. Every mutating o
 
 ```python
 class Transaction:
-    def __init__(self, kernel: NetworkKernel):
+    def __init__(self, kernel: Kernel):
         self.kernel = kernel
         self.undo_log: list[UndoAction] = []
 

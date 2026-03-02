@@ -25,6 +25,10 @@ pip install -e ".[claude]"             # + anthropic SDK
 pip install -e ".[openai]"             # + openai SDK
 pip install -e ".[deepseek]"           # + openai SDK (DeepSeek-compatible)
 pip install -e ".[all]"                # everything
+
+# Domain plugins (install the ones you need):
+pip install -e plugins/network         # network configuration domain
+pip install -e plugins/data            # data pipeline domain
 ```
 
 ### First Run
@@ -44,7 +48,7 @@ sg run configure_bridge_with_stp \
 ### Project Layout
 
 ```
-sg/                               # core runtime
+sg/                               # core engine (domain-agnostic)
 ├── cli.py                        # CLI entry point
 ├── orchestrator.py               # evolutionary loop
 ├── registry.py                   # SHA-256 content-addressed store
@@ -60,6 +64,9 @@ sg/                               # core runtime
 ├── safety.py                     # transactions, blast radius
 ├── regression.py                 # fitness regression detection
 ├── federation.py                 # multi-organism allele sharing
+├── scaffold.py                   # plugin scaffolding (sg new-plugin)
+├── log.py                        # structured logging
+├── audit.py                      # audit trail
 ├── dashboard.py                  # web dashboard (FastAPI)
 ├── snapshot.py                   # genome snapshots/rollback
 ├── diff.py                       # phenotype diffing
@@ -67,18 +74,21 @@ sg/                               # core runtime
 │   ├── types.py                  # AST node types
 │   ├── lexer.py                  # tokenization
 │   └── parser.py                 # AST construction
-└── kernel/                       # gene_sdk implementations
-    ├── base.py                   # NetworkKernel ABC
-    ├── mock.py                   # development/test kernel
-    └── production.py             # real network operations
+└── kernel/                       # kernel infrastructure
+    ├── base.py                   # Kernel ABC + @mutating decorator
+    ├── discovery.py              # entry-point kernel discovery
+    └── stub.py                   # minimal stub kernel
 
-contracts/                        # .sg contract definitions
-├── genes/                        # gene contracts (11)
-├── pathways/                     # pathway contracts (5)
-└── topologies/                   # topology contracts (1)
+plugins/                          # domain plugins (installable packages)
+├── network/                      # network configuration domain
+│   ├── sg_network/               # kernel, mock, production, mappers
+│   ├── contracts/                # .sg contracts
+│   └── genes/                    # seed genes
+└── data/                         # data pipeline domain
+    ├── sg_data/                  # kernel, mock
+    ├── contracts/                # .sg contracts
+    └── genes/                    # seed genes
 
-genes/                            # seed gene source files (11)
-fixtures/                         # mock mutation fixtures
 vim/sg/                           # Neovim syntax highlighting plugin
 ```
 
@@ -132,6 +142,8 @@ The running system: orchestrator + phenotype + registry + fusion tracker. The ap
 ## 3. Writing Contracts
 
 Contracts are the human-machine interface. Domain experts author them — no Python required. The `.sg` format uses verb-based section names that communicate the role of each section in the evolutionary loop.
+
+For the complete syntax reference with cross-domain examples, see [CONTRACT-GUIDE.md](CONTRACT-GUIDE.md).
 
 ### Gene Contracts
 
@@ -370,38 +382,27 @@ def execute(input_json: str) -> str:
 
 ### gene_sdk: The Kernel Interface
 
-The `gene_sdk` object is injected into the gene's namespace at load time. It provides all kernel operations:
+The `gene_sdk` object is injected into the gene's namespace at load time. It is an instance of the active domain kernel, providing domain-specific operations that genes call directly.
 
-**Bridge Operations**:
+The available operations depend on which domain plugin is loaded. Each kernel declares its operations via `describe_operations()`. Examples:
+
+**Network domain** (`sg-network` plugin):
 - `gene_sdk.create_bridge(name, interfaces)` → dict
 - `gene_sdk.delete_bridge(name)` → None
-- `gene_sdk.attach_interface(bridge, interface)` → None
-- `gene_sdk.detach_interface(bridge, interface)` → None
-- `gene_sdk.get_bridge(name)` → dict or None
-
-**STP Operations**:
 - `gene_sdk.set_stp(bridge_name, enabled, forward_delay)` → dict
-- `gene_sdk.get_stp_state(bridge)` → dict
-
-**MAC Operations**:
-- `gene_sdk.get_device_mac(device)` → str
-- `gene_sdk.set_device_mac(device, mac)` → None
-- `gene_sdk.send_gratuitous_arp(interface, mac)` → None
-
-**Bond Operations**:
 - `gene_sdk.create_bond(name, mode, members)` → dict
-- `gene_sdk.delete_bond(name)` → None
-- `gene_sdk.get_bond(name)` → dict or None
 
-**VLAN Operations**:
-- `gene_sdk.create_vlan(parent, vlan_id)` → dict
-- `gene_sdk.delete_vlan(parent, vlan_id)` → None
-- `gene_sdk.get_vlan(parent, vlan_id)` → dict or None
+**Data pipeline domain** (`sg-data` plugin):
+- `gene_sdk.http_get(url, headers)` → dict
+- `gene_sdk.write_records(connection, table, records)` → int
+- `gene_sdk.query_db(connection, sql)` → list[dict]
+- `gene_sdk.row_count(connection, table)` → int
 
-**Diagnostic Reads** (read-only):
-- `gene_sdk.read_fdb(bridge)` → list of dicts (forwarding database entries)
-- `gene_sdk.get_interface_state(interface)` → dict
-- `gene_sdk.get_arp_table()` → list of dicts
+**All kernels provide** (from the base `Kernel` ABC):
+- `gene_sdk.track_resource(resource_type, name)` — track a created resource
+- `gene_sdk.untrack_resource(resource_type, name)` — stop tracking
+
+For the full list of operations in a specific domain, see the domain plugin's kernel source or run `sg kernels` to list available kernels. For building your own domain plugin, see [PLUGIN-GUIDE.md](PLUGIN-GUIDE.md).
 
 ### Sandboxing
 
@@ -573,13 +574,20 @@ Every gene runs inside a restricted `exec()` with:
 
 ### Transactions and Rollback
 
-Configuration genes are wrapped in transactions. The `SafeKernel` proxy records an undo action for every mutating operation:
+Configuration genes are wrapped in transactions. The `SafeKernel` proxy records an undo action for every kernel method decorated with `@mutating`. On failure, all recorded undo actions are executed in reverse order.
 
-- `create_bridge` → records `delete_bridge` as undo
-- `set_stp` → records previous STP state as undo
-- `create_bond` → records `delete_bond` as undo
+Domain kernels declare undo behavior per-operation using the `@mutating` decorator:
 
-If the gene fails or output validation fails, all recorded undo actions are executed in reverse order.
+```python
+@mutating(undo=lambda k, snap, name, config: k.delete_widget(name))
+def create_widget(self, name: str, config: dict) -> dict: ...
+
+@mutating(snapshot=lambda k, name: k.get_widget(name),
+          undo=lambda k, snap, name: k.create_widget(name, snap["config"]) if snap else None)
+def delete_widget(self, name: str) -> None: ...
+```
+
+If the gene fails or output validation fails, all recorded undo actions are executed in reverse order. See [PLUGIN-GUIDE.md](PLUGIN-GUIDE.md) for details on the `@mutating` decorator.
 
 ### Blast Radius Classification
 
@@ -733,6 +741,10 @@ Peer fitness is only factored in when the peer has at least 10 total invocations
 | `sg snapshots` | List all snapshots |
 | `sg rollback <name>` | Restore genome from snapshot |
 | `sg diff [--snapshot N] [--a A --b B]` | Compare genome states |
+| `sg pool <list\|push\|pull\|auto\|serve>` | Manage gene pool membership |
+| `sg recover` | Rebuild registry index from source files |
+| `sg new-plugin <name> [--output-dir DIR]` | Scaffold a new domain plugin |
+| `sg kernels` | List available kernels |
 | `sg completions <bash\|zsh\|fish>` | Generate shell completions |
 
 ### Global Flags
@@ -741,7 +753,9 @@ Peer fitness is only factored in when the peer has at least 10 total invocations
 |------|-------------|
 | `--mutation-engine auto\|mock\|claude\|openai\|deepseek` | Mutation engine (default: auto) |
 | `--model <name>` | Override default model for mutation engine |
-| `--kernel mock\|production` | Kernel type (default: mock) |
+| `--kernel <name>` | Kernel entry point name (see `sg kernels`, default: mock) |
+| `--log-level DEBUG\|INFO\|WARNING\|ERROR` | Logging level (default: WARNING) |
+| `--log-json` | Emit structured JSON log lines |
 | `--version` | Show version |
 
 ---
@@ -760,8 +774,14 @@ Peer fitness is only factored in when the peer has at least 10 total invocations
 
 ### Kernel Selection
 
-- **Mock kernel** (`--kernel mock`): In-memory state, no real system calls. Use for development and testing.
-- **Production kernel** (`--kernel production`): Real `ip link`, `bridge`, and sysfs operations. Requires Linux and sudo. Enforces `sg-test-*` safety prefix on all resource names.
+Kernels are discovered via Python entry points in the `sg.kernels` group. List available kernels with `sg kernels`.
+
+- **Stub kernel** (`--kernel stub`): Minimal no-op kernel. Always available.
+- **Network mock** (`--kernel network-mock`): In-memory network simulation. Requires `sg-network` plugin.
+- **Network production** (`--kernel production`): Real `ip link`, `bridge`, and sysfs operations. Requires Linux and sudo.
+- **Data mock** (`--kernel data-mock`): In-memory data pipeline simulation. Requires `sg-data` plugin.
+
+Third-party plugins register additional kernels. See [PLUGIN-GUIDE.md](PLUGIN-GUIDE.md).
 
 ### Mutation Engine Selection
 
@@ -871,3 +891,17 @@ The plugin provides:
 - Filetype detection for `.sg` files
 - Syntax highlighting for keywords, types, strings, references, operators, control flow, step numbers, and duration literals
 - 2-space indentation settings
+
+---
+
+## 15. Plugin Development
+
+Build a domain plugin to extend Software Genomics for any domain:
+
+```bash
+sg new-plugin my_domain                # scaffold a new plugin
+pip install -e plugins/my_domain       # install in development mode
+sg kernels                             # verify discovery
+```
+
+See [PLUGIN-GUIDE.md](PLUGIN-GUIDE.md) for the complete guide covering kernel implementation, the `@mutating` decorator, mock kernels, contract writing, seed genes, packaging, and testing.

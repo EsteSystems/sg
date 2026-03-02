@@ -568,7 +568,7 @@ def cmd_kernels(args: argparse.Namespace) -> None:
 def cmd_completions(args: argparse.Namespace) -> None:
     """Print shell completion script."""
     subcommands = ("init run deploy generate watch status lineage compete "
-                   "dashboard evolve share pull test diff snapshot rollback snapshots pool recover kernels completions")
+                   "dashboard evolve share pull test diff snapshot rollback snapshots pool recover new-plugin kernels completions")
     engines = "auto mock claude openai deepseek"
     try:
         kernels = " ".join(list_kernel_names())
@@ -940,6 +940,28 @@ def cmd_snapshots(args: argparse.Namespace) -> None:
         print(f"{s.name:<30} {dt:<20} {s.allele_count:<10} {s.loci_count:<8} {s.description}")
 
 
+def cmd_new_plugin(args: argparse.Namespace) -> None:
+    """Scaffold a new domain plugin."""
+    from sg.scaffold import scaffold_plugin, ScaffoldError
+
+    output_dir = Path(args.output_dir)
+    try:
+        plugin_dir = scaffold_plugin(args.name, output_dir)
+    except ScaffoldError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Created plugin at {plugin_dir}/")
+    print()
+    print("Next steps:")
+    print(f"  1. Edit sg_{args.name.replace('-', '_')}/kernel.py — add domain operations")
+    print(f"  2. Edit sg_{args.name.replace('-', '_')}/mock.py — implement mock versions")
+    print(f"  3. Edit contracts/genes/ — write .sg contracts for your domain")
+    print(f"  4. Edit genes/ — write seed gene implementations")
+    print(f"  5. Install: pip install -e {plugin_dir}")
+    print(f"  6. Verify: sg kernels")
+
+
 def cmd_recover(args: argparse.Namespace) -> None:
     """Rebuild registry index from source files."""
     root = get_project_root()
@@ -1063,6 +1085,11 @@ def main() -> None:
 
     subparsers.add_parser("recover", help="rebuild registry index from source files")
 
+    new_plugin_parser = subparsers.add_parser("new-plugin", help="scaffold a new domain plugin")
+    new_plugin_parser.add_argument("name", help="plugin name (e.g., 'storage', 'monitoring')")
+    new_plugin_parser.add_argument("--output-dir", default="plugins",
+                                    help="parent directory for the plugin (default: plugins/)")
+
     subparsers.add_parser("kernels", help="list available kernels")
 
     comp_parser = subparsers.add_parser("completions", help="generate shell completions")
@@ -1116,6 +1143,8 @@ def main() -> None:
         cmd_pool(args)
     elif args.command == "recover":
         cmd_recover(args)
+    elif args.command == "new-plugin":
+        cmd_new_plugin(args)
     elif args.command == "kernels":
         cmd_kernels(args)
     elif args.command == "completions":

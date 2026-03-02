@@ -9,6 +9,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sg.filelock import file_lock
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -111,7 +113,8 @@ class PhenotypeMap:
             if fusion.composition_fingerprint:
                 entry["composition_fingerprint"] = fusion.composition_fingerprint
             data["pathway_fusion"][key] = entry
-        path.write_bytes(tomli_w.dumps(data).encode())
+        with file_lock(path):
+            path.write_bytes(tomli_w.dumps(data).encode())
 
     @classmethod
     def load(cls, path: Path) -> PhenotypeMap:

@@ -17,8 +17,11 @@ from starlette.responses import StreamingResponse
 from sg import arena
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
+from sg.log import get_logger
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
+
+logger = get_logger("dashboard")
 
 
 app = FastAPI(title="Software Genome Dashboard")
@@ -406,5 +409,5 @@ def run_dashboard(root: Path, host: str = "127.0.0.1", port: int = 8420) -> None
     global _project_root
     _project_root = root
     import uvicorn
-    print(f"Starting dashboard at http://{host}:{port}")
+    logger.info("Starting dashboard at http://%s:%d", host, port)
     uvicorn.run(app, host=host, port=port, log_level="warning")

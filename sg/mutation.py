@@ -12,8 +12,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sg.log import get_logger
+
+logger = get_logger("mutation")
+
 if TYPE_CHECKING:
     from sg.contracts import ContractStore
+    from sg.mutation_cache import MutationCache
 
 
 @dataclass
@@ -90,9 +95,11 @@ class LLMMutationEngine(MutationEngine):
     Subclasses only need to implement _call_api().
     """
 
-    def __init__(self, contract_store: ContractStore, kernel: 'Kernel | None' = None):
+    def __init__(self, contract_store: ContractStore, kernel: 'Kernel | None' = None,
+                 cache: 'MutationCache | None' = None):
         self.contract_store = contract_store
         self._kernel = kernel
+        self._cache = cache
 
     @abstractmethod
     def _call_api(self, prompt: str) -> str:
@@ -165,6 +172,20 @@ class LLMMutationEngine(MutationEngine):
 
     def mutate(self, ctx: MutationContext) -> str:
         contract_ctx = self._contract_prompt(ctx.locus)
+
+        # Check cache before calling LLM
+        if self._cache is not None:
+            from sg.mutation_cache import MutationCache
+            key = MutationCache.cache_key(
+                contract_ctx, ctx.error_message,
+                ctx.gene_source[:64] if ctx.gene_source else "",
+            )
+            cached = self._cache.get(key)
+            if cached is not None:
+                logger.info("mutation cache hit for %s", ctx.locus,
+                            extra={"locus": ctx.locus})
+                return cached
+
         system_ctx = self._system_context()
         prompt = f"""You are a gene mutation engine for the Software Genomics runtime.
 
@@ -191,7 +212,13 @@ Write a fixed version of this gene. The gene must:
 
 Return ONLY the Python source code in a ```python``` block."""
         text = self._call_api(prompt)
-        return self._extract_python(text)
+        source = self._extract_python(text)
+
+        # Store in cache
+        if self._cache is not None:
+            self._cache.put(key, source)
+
+        return source
 
     def generate(self, locus: str, contract_prompt: str,
                  count: int = 1) -> list[str]:
@@ -314,8 +341,9 @@ class ClaudeMutationEngine(LLMMutationEngine):
     """Calls the Anthropic API to generate mutations."""
 
     def __init__(self, api_key: str, contract_store: ContractStore,
-                 model: str = "claude-sonnet-4-5-20250929", kernel: 'Kernel | None' = None):
-        super().__init__(contract_store, kernel=kernel)
+                 model: str = "claude-sonnet-4-5-20250929", kernel: 'Kernel | None' = None,
+                 cache: 'MutationCache | None' = None):
+        super().__init__(contract_store, kernel=kernel, cache=cache)
         self.api_key = api_key
         self.model = model
 
@@ -356,8 +384,9 @@ class OpenAIMutationEngine(LLMMutationEngine):
 
     def __init__(self, api_key: str, contract_store: ContractStore,
                  model: str | None = None, base_url: str | None = None,
-                 kernel: 'Kernel | None' = None):
-        super().__init__(contract_store, kernel=kernel)
+                 kernel: 'Kernel | None' = None,
+                 cache: 'MutationCache | None' = None):
+        super().__init__(contract_store, kernel=kernel, cache=cache)
         self.api_key = api_key
         self.model = model or self.DEFAULT_MODEL
         self.base_url = base_url or self.DEFAULT_BASE_URL

@@ -9,7 +9,7 @@ from sg.loader import load_gene, call_gene
 from sg.sandbox import (
     make_sandbox_globals, execute_with_timeout,
     GeneImportError, GeneTimeout,
-    BLOCKED_BUILTINS, ALLOWED_MODULES,
+    BLOCKED_BUILTINS, BLOCKED_MODULES, ALLOWED_MODULES,
 )
 
 
@@ -120,6 +120,35 @@ def execute(input_json):
     return '{}'
 '''
         with pytest.raises(GeneImportError, match="cannot import 'shutil'"):
+            load_gene(source, kernel)
+
+
+class TestBlockedModules:
+    """Tests for the explicit BLOCKED_MODULES set (Phase 11 hardening)."""
+
+    @pytest.mark.parametrize("module", [
+        "pickle", "ctypes", "marshal", "shelve",
+        "multiprocessing", "threading", "importlib",
+        "pathlib", "tempfile", "http", "urllib",
+        "signal", "resource", "code", "webbrowser",
+    ])
+    def test_blocked_module_rejected(self, kernel, module):
+        source = f'''
+import {module}
+def execute(input_json):
+    return '{{}}'
+'''
+        with pytest.raises(GeneImportError, match="blocked"):
+            load_gene(source, kernel)
+
+    def test_blocked_submodule_rejected(self, kernel):
+        """Submodule of a blocked top-level is also blocked."""
+        source = '''
+import http.client
+def execute(input_json):
+    return '{}'
+'''
+        with pytest.raises(GeneImportError, match="blocked"):
             load_gene(source, kernel)
 
 

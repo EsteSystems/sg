@@ -15,7 +15,10 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from sg.kernel.base import Kernel
+from sg.log import get_logger
 from sg.parser.types import BlastRadius
+
+logger = get_logger("safety")
 
 
 @dataclass
@@ -54,7 +57,7 @@ class Transaction:
                 action.fn()
                 rolled_back.append(action.description)
             except Exception as e:
-                print(f"  [rollback] failed: {action.description}: {e}")
+                logger.error("rollback failed: %s: %s", action.description, e)
         self.undo_log.clear()
         self.rolled_back = True
         return rolled_back

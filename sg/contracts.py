@@ -9,11 +9,14 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from sg.log import get_logger
 from sg.parser.parser import parse_sg
 from sg.parser.types import (
     GeneContract, PathwayContract, TopologyContract,
     GeneFamily, BlastRadius, FieldDef,
 )
+
+logger = get_logger("contracts")
 
 
 @dataclass
@@ -106,12 +109,9 @@ class ContractStore:
         # Domain validation
         contract_domain = getattr(contract, "domain", None)
         if contract_domain and kernel_domain and contract_domain != kernel_domain:
-            import sys
-            print(
-                f"warning: contract '{contract.name}' requires domain "
-                f"'{contract_domain}' (kernel provides '{kernel_domain}')",
-                file=sys.stderr,
-            )
+            logger.warning("contract '%s' requires domain '%s' "
+                           "(kernel provides '%s')",
+                           contract.name, contract_domain, kernel_domain)
 
         if isinstance(contract, GeneContract):
             self.genes[contract.name] = contract

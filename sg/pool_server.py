@@ -9,6 +9,7 @@ same pattern as Registry.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import time
@@ -18,6 +19,10 @@ from typing import Any
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
+
+from sg.log import get_logger
+
+logger = get_logger("pool_server")
 
 
 # --- Data models ---
@@ -346,7 +351,7 @@ def create_pool_app(
             return JSONResponse(
                 {"error": "authentication required"}, status_code=401,
             )
-        if authorization[7:] != token:
+        if not hmac.compare_digest(authorization[7:], token):
             return JSONResponse(
                 {"error": "invalid token"}, status_code=401,
             )
@@ -513,8 +518,8 @@ def run_pool_server(
     """Start the pool server."""
     import uvicorn
     app = create_pool_app(data_dir, token=token, reciprocity=reciprocity)
-    print(f"Starting pool server at http://{host}:{port}")
-    print(f"  Data directory: {data_dir}")
-    print(f"  Authentication: {'enabled' if token else 'disabled'}")
-    print(f"  Reciprocity threshold: {reciprocity}")
+    logger.info("Starting pool server at http://%s:%d", host, port)
+    logger.info("  Data directory: %s", data_dir)
+    logger.info("  Authentication: %s", "enabled" if token else "disabled")
+    logger.info("  Reciprocity threshold: %d", reciprocity)
     uvicorn.run(app, host=host, port=port, log_level="warning")

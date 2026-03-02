@@ -12,6 +12,11 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 
+from sg.filelock import file_lock
+from sg.log import get_logger
+
+logger = get_logger("registry")
+
 
 class AlleleState(str, Enum):
     DOMINANT = "dominant"
@@ -54,6 +59,7 @@ class Registry:
         self.sources_dir = root / "sources"
         self.index_path = root / "registry.json"
         self.alleles: dict[str, AlleleMetadata] = {}
+        self._locus_index: dict[str, list[str]] = {}  # locus -> [sha, ...]
 
     def ensure_dirs(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -72,6 +78,10 @@ class Registry:
                 generation=generation,
                 parent_sha=parent_sha,
             )
+            # Update locus index
+            self._locus_index.setdefault(locus, [])
+            if sha not in self._locus_index[locus]:
+                self._locus_index[locus].append(sha)
         return sha
 
     def get(self, sha: str) -> AlleleMetadata | None:
@@ -87,23 +97,69 @@ class Registry:
         return None
 
     def alleles_for_locus(self, locus: str) -> list[AlleleMetadata]:
-        """Return alleles for a locus, sorted by fitness descending."""
+        """Return alleles for a locus, sorted by fitness descending.
+
+        Uses the locus index for O(k) lookup instead of O(n) scan.
+        """
         from sg.arena import compute_fitness
-        matching = [a for a in self.alleles.values() if a.locus == locus]
+        shas = self._locus_index.get(locus, [])
+        matching = [self.alleles[s] for s in shas if s in self.alleles]
         matching.sort(key=lambda a: compute_fitness(a), reverse=True)
         return matching
 
     def save_index(self) -> None:
         data = {sha: meta.to_dict() for sha, meta in self.alleles.items()}
-        self.index_path.write_text(json.dumps(data, indent=2))
+        with file_lock(self.index_path):
+            self.index_path.write_text(json.dumps(data, indent=2))
+
+    def _rebuild_locus_index(self) -> None:
+        """Rebuild the locus index from current alleles dict."""
+        self._locus_index.clear()
+        for sha, meta in self.alleles.items():
+            self._locus_index.setdefault(meta.locus, [])
+            if sha not in self._locus_index[meta.locus]:
+                self._locus_index[meta.locus].append(sha)
 
     def load_index(self) -> None:
         if self.index_path.exists():
-            data = json.loads(self.index_path.read_text())
-            self.alleles = {
-                sha: AlleleMetadata.from_dict(meta)
-                for sha, meta in data.items()
-            }
+            try:
+                data = json.loads(self.index_path.read_text())
+                self.alleles = {
+                    sha: AlleleMetadata.from_dict(meta)
+                    for sha, meta in data.items()
+                }
+            except json.JSONDecodeError:
+                logger.warning("registry index corrupted, attempting recovery")
+                self.rebuild_index()
+        self._rebuild_locus_index()
+
+    def rebuild_index(self) -> int:
+        """Rebuild the allele index by scanning source files.
+
+        For each .py file in sources/, verify the SHA matches the filename
+        and create a minimal AlleleMetadata entry. Returns the number of
+        recovered alleles.
+        """
+        recovered = 0
+        if not self.sources_dir.exists():
+            return recovered
+        for path in sorted(self.sources_dir.glob("*.py")):
+            sha_from_name = path.stem
+            source = path.read_text()
+            actual_sha = hashlib.sha256(source.encode()).hexdigest()
+            if actual_sha != sha_from_name:
+                logger.warning("SHA mismatch for %s (expected %s), skipping",
+                               path.name, actual_sha[:12])
+                continue
+            if sha_from_name not in self.alleles:
+                self.alleles[sha_from_name] = AlleleMetadata(
+                    sha256=sha_from_name,
+                    locus="unknown",
+                )
+                recovered += 1
+        self._rebuild_locus_index()
+        logger.info("recovered %d allele(s) from source files", recovered)
+        return recovered
 
     @classmethod
     def open(cls, root: Path) -> Registry:

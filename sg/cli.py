@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from sg import __version__, arena
+from sg.log import configure_logging
 from sg.contracts import ContractStore, validate_output
 from sg.fusion import FusionTracker
 from sg.kernel.discovery import load_kernel, list_kernel_names, KernelNotFoundError, KernelLoadError
@@ -567,7 +568,7 @@ def cmd_kernels(args: argparse.Namespace) -> None:
 def cmd_completions(args: argparse.Namespace) -> None:
     """Print shell completion script."""
     subcommands = ("init run deploy generate watch status lineage compete "
-                   "dashboard evolve share pull test diff snapshot rollback snapshots pool kernels completions")
+                   "dashboard evolve share pull test diff snapshot rollback snapshots pool recover kernels completions")
     engines = "auto mock claude openai deepseek"
     try:
         kernels = " ".join(list_kernel_names())
@@ -939,6 +940,16 @@ def cmd_snapshots(args: argparse.Namespace) -> None:
         print(f"{s.name:<30} {dt:<20} {s.allele_count:<10} {s.loci_count:<8} {s.description}")
 
 
+def cmd_recover(args: argparse.Namespace) -> None:
+    """Rebuild registry index from source files."""
+    root = get_project_root()
+    registry = Registry.open(root / ".sg" / "registry")
+    recovered = registry.rebuild_index()
+    registry.save_index()
+    print(f"Recovery complete: {recovered} allele(s) recovered from source files")
+    print(f"Total alleles in index: {len(registry.alleles)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="sg", description="Software Genome runtime")
     parser.add_argument("--version", action="version", version=f"sg {__version__}")
@@ -949,6 +960,11 @@ def main() -> None:
                         help="override default model for the mutation engine")
     parser.add_argument("--kernel", default="mock",
                         help="kernel to use (see 'sg kernels' for available)")
+    parser.add_argument("--log-level", default="WARNING",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="logging level (default: WARNING)")
+    parser.add_argument("--log-json", action="store_true",
+                        help="emit structured JSON log lines")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="initialize genome from seed genes")
@@ -1045,6 +1061,8 @@ def main() -> None:
     pool_serve.add_argument("--reciprocity", type=int, default=1,
                             help="min pushes before pulls allowed (0 disables, default: 1)")
 
+    subparsers.add_parser("recover", help="rebuild registry index from source files")
+
     subparsers.add_parser("kernels", help="list available kernels")
 
     comp_parser = subparsers.add_parser("completions", help="generate shell completions")
@@ -1052,6 +1070,11 @@ def main() -> None:
                              help="shell type")
 
     args = parser.parse_args()
+
+    configure_logging(
+        level=args.log_level,
+        json_format=args.log_json,
+    )
 
     if args.command == "init":
         cmd_init(args)
@@ -1091,6 +1114,8 @@ def main() -> None:
         cmd_snapshots(args)
     elif args.command == "pool":
         cmd_pool(args)
+    elif args.command == "recover":
+        cmd_recover(args)
     elif args.command == "kernels":
         cmd_kernels(args)
     elif args.command == "completions":

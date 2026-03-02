@@ -111,8 +111,9 @@ class TestContractsCompatible:
 
 
 class TestDomainValidation:
-    def test_load_file_warns_domain_mismatch(self, tmp_path, capsys):
-        """Loading a contract with wrong domain prints a warning."""
+    def test_load_file_warns_domain_mismatch(self, tmp_path, caplog):
+        """Loading a contract with wrong domain logs a warning."""
+        import logging
         sg_file = tmp_path / "test.sg"
         sg_file.write_text("""\
 gene bridge_create for network
@@ -123,11 +124,10 @@ gene bridge_create for network
     Create a bridge.
 """)
         store = ContractStore()
-        store.load_file(sg_file, kernel_domain="storage")
-        captured = capsys.readouterr()
-        assert "warning" in captured.err
-        assert "network" in captured.err
-        assert "storage" in captured.err
+        with caplog.at_level(logging.WARNING, logger="sg.contracts"):
+            store.load_file(sg_file, kernel_domain="storage")
+        assert "network" in caplog.text
+        assert "storage" in caplog.text
         # Contract is still loaded despite warning
         assert "bridge_create" in store.genes
 

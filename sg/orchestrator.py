@@ -8,6 +8,10 @@ import json
 from pathlib import Path
 
 from sg import arena
+from sg.audit import AuditLog
+from sg.log import get_logger, correlation_scope
+
+logger = get_logger("orchestrator")
 from sg.contracts import ContractStore, validate_output
 from sg.fitness import record_feedback
 from sg.fusion import FusionTracker
@@ -36,6 +40,7 @@ class Orchestrator:
         kernel: Kernel,
         contract_store: ContractStore,
         project_root: Path,
+        audit_log: AuditLog | None = None,
     ):
         self.registry = registry
         self.phenotype = phenotype
@@ -44,10 +49,17 @@ class Orchestrator:
         self.kernel = kernel
         self.contract_store = contract_store
         self.project_root = project_root
+        self.audit_log = audit_log
         self.verify_scheduler = VerifyScheduler()
         self._regression_path = project_root / ".sg" / "regression.json"
         self.regression_detector = RegressionDetector.open(self._regression_path)
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
+
+    def _audit(self, event: str, locus: str = "", sha: str = "",
+                **details) -> None:
+        """Record an audit entry if an audit log is configured."""
+        if self.audit_log is not None:
+            self.audit_log.record(event, locus=locus, sha=sha, **details)
 
     def _get_risk(self, locus: str) -> BlastRadius:
         """Get the blast radius for a locus from its contract."""
@@ -63,6 +75,7 @@ class Orchestrator:
         Triggers mutation on exhaustion. Wraps each allele attempt in a
         transaction — on failure, all kernel mutations are rolled back.
         """
+        logger.debug("execute_locus %s", locus, extra={"locus": locus})
         stack = self.phenotype.get_stack(locus)
         last_error = ""
         risk = self._get_risk(locus)
@@ -105,22 +118,26 @@ class Orchestrator:
                 self._schedule_verify(locus, input_json)
                 self._check_promotion(locus, sha)
                 self._check_regression(locus, sha, input_json)
-                print(f"  [{locus}] success via {sha[:12]} "
-                      f"(fitness: {arena.compute_fitness(allele):.2f})")
+                logger.info("success via %s (fitness: %.2f)",
+                            sha[:12], arena.compute_fitness(allele),
+                            extra={"locus": locus, "sha": sha[:12]})
                 return (result, sha)
 
             except Exception as e:
                 if txn and txn.action_count > 0:
                     rolled = txn.rollback()
                     if rolled:
-                        print(f"  [{locus}] rolled back {len(rolled)} action(s)")
+                        logger.info("rolled back %d action(s)",
+                                    len(rolled), extra={"locus": locus})
                 last_error = str(e)
                 arena.record_failure(allele)
                 self._check_demotion(locus, sha)
-                print(f"  [{locus}] failed via {sha[:12]}: {e}")
+                logger.warning("failed via %s: %s", sha[:12], e,
+                               extra={"locus": locus, "sha": sha[:12]})
                 continue
 
-        print(f"  [{locus}] all alleles exhausted, triggering mutation...")
+        logger.info("all alleles exhausted, triggering mutation...",
+                    extra={"locus": locus})
         mutated = self._try_mutation(locus, input_json, last_error)
         if mutated is not None:
             return mutated
@@ -128,6 +145,22 @@ class Orchestrator:
         return None
 
     def _try_mutation(
+        self, locus: str, input_json: str, error: str
+    ) -> tuple[str, str] | None:
+        """Attempt to generate a working mutant allele.
+
+        Wrapped in an outer try/except for graceful degradation — if the
+        mutation subsystem is completely unavailable (e.g. LLM API down),
+        the system continues with existing alleles.
+        """
+        try:
+            return self._try_mutation_inner(locus, input_json, error)
+        except Exception as e:
+            logger.warning("mutation subsystem unavailable for %s: %s",
+                           locus, e, extra={"locus": locus})
+            return None
+
+    def _try_mutation_inner(
         self, locus: str, input_json: str, error: str
     ) -> tuple[str, str] | None:
         dominant_sha = self.phenotype.get_dominant(locus)
@@ -149,7 +182,8 @@ class Orchestrator:
             try:
                 new_source = self.mutation_engine.mutate(ctx)
             except Exception as e:
-                print(f"  [mutation] generation failed (attempt {attempt + 1}): {e}")
+                logger.warning("mutation generation failed (attempt %d): %s",
+                               attempt + 1, e, extra={"locus": locus})
                 continue
 
             parent_sha = dominant_sha
@@ -177,21 +211,29 @@ class Orchestrator:
                 allele = self.registry.get(new_sha)
                 if allele:
                     arena.record_success(allele)
-                print(f"  [mutation] mutant {new_sha[:12]} succeeded (attempt {attempt + 1})")
+                logger.info("mutant %s succeeded (attempt %d)",
+                            new_sha[:12], attempt + 1,
+                            extra={"locus": locus, "sha": new_sha[:12]})
+                self._audit("mutation_success", locus=locus, sha=new_sha,
+                            attempt=attempt + 1)
                 return (result, new_sha)
 
             except Exception as e:
                 if txn and txn.action_count > 0:
                     rolled = txn.rollback()
                     if rolled:
-                        print(f"  [mutation] rolled back {len(rolled)} action(s)")
+                        logger.info("mutation rolled back %d action(s)",
+                                    len(rolled), extra={"locus": locus})
                 allele = self.registry.get(new_sha)
                 if allele:
                     arena.record_failure(allele)
-                print(f"  [mutation] mutant {new_sha[:12]} failed: {e} (attempt {attempt + 1})")
+                logger.warning("mutant %s failed: %s (attempt %d)",
+                               new_sha[:12], e, attempt + 1,
+                               extra={"locus": locus, "sha": new_sha[:12]})
                 continue
 
-        print(f"  [mutation] all {MAX_MUTATION_RETRIES} attempts failed for {locus}")
+        logger.warning("all %d mutation attempts failed for %s",
+                       MAX_MUTATION_RETRIES, locus, extra={"locus": locus})
         return None
 
     def _check_promotion(self, locus: str, sha: str) -> None:
@@ -204,7 +246,10 @@ class Orchestrator:
             if dominant:
                 arena.set_recessive(dominant)
             self.phenotype.promote(locus, sha)
-            print(f"  [arena] promoted {sha[:12]} to dominant for {locus}")
+            logger.info("promoted %s to dominant for %s", sha[:12], locus,
+                        extra={"locus": locus, "sha": sha[:12], "event": "promotion"})
+            self._audit("promotion", locus=locus, sha=sha,
+                        fitness=arena.compute_fitness(allele))
 
     def _process_diagnostic_feedback(self, locus: str, output_json: str) -> None:
         """If this locus is a diagnostic gene with feeds, feed results back."""
@@ -239,9 +284,10 @@ class Orchestrator:
 
             record_feedback(target_allele, timescale, healthy, locus)
             fitness = arena.compute_fitness(target_allele)
-            print(f"  [feedback] {locus} → {target_locus} "
-                  f"({timescale}: {'healthy' if healthy else 'unhealthy'}, "
-                  f"fitness: {fitness:.2f})")
+            logger.info("feedback %s -> %s (%s: %s, fitness: %.2f)",
+                        locus, target_locus, timescale,
+                        "healthy" if healthy else "unhealthy", fitness,
+                        extra={"locus": locus})
 
     def _schedule_verify(self, locus: str, input_json: str) -> None:
         """Schedule verify diagnostics if the locus contract declares a verify block."""
@@ -287,23 +333,30 @@ class Orchestrator:
             allele.shadow_successes += 1
             remaining = SHADOW_PROMOTION_THRESHOLD - allele.shadow_successes
             if remaining > 0:
-                print(f"  [{locus}] shadow success via {sha[:12]} "
-                      f"({allele.shadow_successes}/{SHADOW_PROMOTION_THRESHOLD})")
+                logger.info("shadow success via %s (%d/%d)",
+                            sha[:12], allele.shadow_successes,
+                            SHADOW_PROMOTION_THRESHOLD,
+                            extra={"locus": locus, "sha": sha[:12]})
             else:
-                print(f"  [{locus}] shadow threshold met for {sha[:12]} "
-                      f"— eligible for live execution")
+                logger.info("shadow threshold met for %s — eligible for "
+                            "live execution", sha[:12],
+                            extra={"locus": locus, "sha": sha[:12]})
             return (result, sha)
 
         except Exception as e:
             allele.shadow_successes = 0  # reset on failure
-            print(f"  [{locus}] shadow failed via {sha[:12]}: {e}")
+            logger.warning("shadow failed via %s: %s", sha[:12], e,
+                           extra={"locus": locus, "sha": sha[:12]})
             return None
 
     def _check_demotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)
         if allele and arena.should_demote(allele):
             arena.set_deprecated(allele)
-            print(f"  [arena] demoted {sha[:12]} for {locus} (3 consecutive failures)")
+            logger.info("demoted %s for %s (3 consecutive failures)",
+                        sha[:12], locus,
+                        extra={"locus": locus, "sha": sha[:12], "event": "demotion"})
+            self._audit("demotion", locus=locus, sha=sha)
 
     def _check_regression(self, locus: str, sha: str, input_json: str) -> None:
         """Check for fitness regression and respond proactively."""
@@ -314,10 +367,15 @@ class Orchestrator:
         self.regression_detector.save(self._regression_path)
         if severity == "severe":
             arena.set_deprecated(allele)
-            print(f"  [regression] severe regression for {sha[:12]}, demoting")
+            logger.warning("severe regression for %s, demoting", sha[:12],
+                           extra={"locus": locus, "sha": sha[:12],
+                                  "event": "regression"})
+            self._audit("regression_severe", locus=locus, sha=sha)
         elif severity == "mild":
-            print(f"  [regression] mild regression for {sha[:12]}, "
-                  f"proactive mutation queued")
+            logger.info("mild regression for %s, proactive mutation queued",
+                        sha[:12], extra={"locus": locus, "sha": sha[:12],
+                                         "event": "regression"})
+            self._audit("regression_mild", locus=locus, sha=sha)
             self._queue_proactive_mutation(locus, input_json)
 
     def _queue_proactive_mutation(self, locus: str, input_json: str) -> None:
@@ -341,9 +399,11 @@ class Orchestrator:
                 allele = self.registry.get(sha)
                 if allele:
                     allele.state = "recessive"
-                print(f"  [regression] proactive mutant registered: {sha[:12]}")
+                logger.info("proactive mutant registered: %s", sha[:12],
+                            extra={"locus": locus, "sha": sha[:12]})
         except Exception as e:
-            print(f"  [regression] proactive mutation failed: {e}")
+            logger.warning("proactive mutation failed: %s", e,
+                           extra={"locus": locus})
 
     def run_pathway(self, pathway_name: str, input_json: str) -> list[str]:
         """Execute a named pathway.
@@ -352,6 +412,10 @@ class Orchestrator:
         - "rollback all": clean up all tracked resources on failure
         - "report partial": let partial results stand
         """
+        with correlation_scope() as cid:
+            return self._run_pathway_inner(pathway_name, input_json)
+
+    def _run_pathway_inner(self, pathway_name: str, input_json: str) -> list[str]:
         pathway_contract = self.contract_store.get_pathway(pathway_name)
         if pathway_contract is not None:
             pathway = pathway_from_contract(pathway_contract)
@@ -359,7 +423,8 @@ class Orchestrator:
         else:
             raise ValueError(f"unknown pathway: {pathway_name}")
 
-        print(f"Executing pathway: {pathway_name}")
+        logger.info("Executing pathway: %s", pathway_name,
+                    extra={"pathway": pathway_name})
 
         # Snapshot tracked resources before pathway starts
         resources_before = set(self.kernel.tracked_resources())
@@ -376,7 +441,8 @@ class Orchestrator:
                 self._rollback_pathway_resources(resources_before)
             raise
 
-        print(f"Pathway '{pathway_name}' completed with {len(outputs)} output(s)")
+        logger.info("Pathway '%s' completed with %d output(s)",
+                    pathway_name, len(outputs), extra={"pathway": pathway_name})
         return outputs
 
     def _rollback_pathway_resources(
@@ -388,13 +454,14 @@ class Orchestrator:
         if not new_resources:
             return
 
-        print(f"  [safety] rolling back {len(new_resources)} resource(s)...")
+        logger.info("rolling back %d resource(s)...", len(new_resources))
         for resource_type, name in new_resources:
             try:
                 self.kernel.delete_resource(resource_type, name)
-                print(f"  [safety] cleaned up {resource_type} '{name}'")
+                logger.info("cleaned up %s '%s'", resource_type, name)
             except Exception as e:
-                print(f"  [safety] cleanup failed for {resource_type} '{name}': {e}")
+                logger.error("cleanup failed for %s '%s': %s",
+                             resource_type, name, e)
 
     def run_topology(self, topology_name: str, input_json: str) -> list[str]:
         """Execute a named topology by decomposing into pathway/gene calls."""
@@ -404,11 +471,12 @@ class Orchestrator:
         if topology is None:
             raise ValueError(f"unknown topology: {topology_name}")
 
-        print(f"Deploying topology: {topology_name}")
+        logger.info("Deploying topology: %s", topology_name)
         outputs = execute_topology(
             topology, input_json, self, self.kernel.resource_mappers()
         )
-        print(f"Topology '{topology_name}' deployed ({len(outputs)} output(s))")
+        logger.info("Topology '%s' deployed (%d output(s))",
+                    topology_name, len(outputs))
         return outputs
 
     def save_state(self) -> None:

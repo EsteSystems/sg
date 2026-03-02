@@ -12,6 +12,10 @@ import re
 import threading
 from typing import TYPE_CHECKING
 
+from sg.log import get_logger
+
+logger = get_logger("verify")
+
 if TYPE_CHECKING:
     from sg.orchestrator import Orchestrator
     from sg.parser.types import VerifyStep
@@ -90,13 +94,16 @@ class VerifyScheduler:
         self, locus: str, resolved_input: str, orchestrator: Orchestrator
     ) -> None:
         """Execute a single verify diagnostic."""
-        print(f"  [verify] running scheduled diagnostic: {locus}")
+        logger.info("running scheduled diagnostic: %s", locus,
+                    extra={"locus": locus})
         try:
             result = orchestrator.execute_locus(locus, resolved_input)
             if result is None:
-                print(f"  [verify] diagnostic {locus} returned no result")
+                logger.warning("diagnostic %s returned no result", locus,
+                               extra={"locus": locus})
         except Exception as e:
-            print(f"  [verify] diagnostic {locus} failed: {e}")
+            logger.error("diagnostic %s failed: %s", locus, e,
+                         extra={"locus": locus})
 
     def wait(self, timeout: float = 60.0) -> None:
         """Block until all pending verify timers have completed."""

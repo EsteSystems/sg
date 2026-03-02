@@ -13,9 +13,12 @@ from pathlib import Path
 
 from sg.kernel.base import Kernel
 from sg.loader import load_gene, call_gene
+from sg.log import get_logger
 from sg.mutation import MutationEngine
 from sg.registry import Registry
 from sg.phenotype import PhenotypeMap
+
+logger = get_logger("fusion")
 
 
 FUSION_THRESHOLD = 10
@@ -117,21 +120,22 @@ def fuse_pathway(
     for sha in allele_shas:
         source = registry.load_source(sha)
         if source is None:
-            print(f"  [fusion] cannot load source for {sha[:12]}")
+            logger.warning("cannot load source for %s", sha[:12])
             return None
         sources.append(source)
 
     try:
         fused_source = mutation_engine.generate_fused(pathway_name, sources, loci)
     except Exception as e:
-        print(f"  [fusion] generation failed: {e}")
+        logger.error("fusion generation failed: %s", e)
         return None
 
     fused_sha = registry.register(fused_source, loci[0])
     fingerprint = composition_fingerprint(allele_shas)
     phenotype.set_fused(pathway_name, fused_sha, fingerprint)
 
-    print(f"  [fusion] pathway '{pathway_name}' fused → {fused_sha[:12]}")
+    logger.info("pathway '%s' fused -> %s", pathway_name, fused_sha[:12],
+                extra={"pathway": pathway_name, "sha": fused_sha[:12]})
     return fused_sha
 
 
@@ -155,18 +159,21 @@ def try_fused_execution(
     fused_sha = fusion_config.fused_sha
     source = registry.load_source(fused_sha)
     if source is None:
-        print(f"  [fusion] fused source not found: {fused_sha[:12]}")
+        logger.warning("fused source not found: %s", fused_sha[:12])
         phenotype.clear_fused(pathway_name)
         return None
 
     try:
         execute_fn = load_gene(source, kernel)
         result = call_gene(execute_fn, input_json)
-        print(f"  [fusion] fused execution succeeded for '{pathway_name}'")
+        logger.info("fused execution succeeded for '%s'", pathway_name,
+                     extra={"pathway": pathway_name})
         return result
     except Exception as e:
-        print(f"  [fusion] fused execution failed: {e}")
-        print(f"  [fusion] decomposing pathway '{pathway_name}' back to individual steps")
+        logger.warning("fused execution failed: %s", e,
+                       extra={"pathway": pathway_name})
+        logger.info("decomposing pathway '%s' back to individual steps",
+                    pathway_name, extra={"pathway": pathway_name})
         fusion_tracker.record_failure(pathway_name)
         phenotype.clear_fused(pathway_name)
         return None

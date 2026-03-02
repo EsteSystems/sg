@@ -16,6 +16,7 @@ from typing import Callable, Union
 
 from sg.kernel.base import Kernel
 from sg.fusion import FusionTracker, fuse_pathway, try_fused_execution
+from sg.log import get_logger
 from sg.mutation import MutationEngine
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
@@ -24,6 +25,8 @@ from sg.parser.types import (
     ForStep as ASTForStep, ConditionalStep as ASTConditionalStep,
     Dependency,
 )
+
+logger = get_logger("pathway")
 
 
 # --- Runtime step types ---
@@ -129,7 +132,8 @@ def execute_pathway(
 
     fingerprint = fusion_tracker.record_success(pathway.name, allele_shas)
     if fingerprint is not None:
-        print(f"  [pathway] fusion threshold reached for '{pathway.name}'!")
+        logger.info("fusion threshold reached for '%s'", pathway.name,
+                    extra={"pathway": pathway.name})
         loci = []
         for step in pathway.steps:
             if isinstance(step, PathwayStep):

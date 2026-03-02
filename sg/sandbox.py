@@ -18,6 +18,18 @@ BLOCKED_BUILTINS = frozenset({
     "breakpoint", "exit", "quit",
 })
 
+# Modules explicitly blocked — checked first, before ALLOWED_MODULES.
+# Covers process control, filesystem, networking, serialization, and
+# dynamic code execution that genes must never access.
+BLOCKED_MODULES = frozenset({
+    "os", "sys", "subprocess", "multiprocessing", "threading",
+    "socket", "http", "urllib", "ftplib", "smtplib",
+    "ctypes", "pickle", "shelve", "marshal",
+    "importlib", "shutil", "pathlib", "tempfile",
+    "signal", "resource", "code", "codeop",
+    "webbrowser", "antigravity",
+})
+
 # Modules that genes are allowed to import
 ALLOWED_MODULES = frozenset({
     "json", "math", "re", "hashlib", "datetime", "collections",
@@ -40,9 +52,21 @@ class GeneTimeout(Exception):
 
 def _restricted_import(name: str, globals=None, locals=None,
                        fromlist=(), level=0):
-    """Import function that only allows modules in ALLOWED_MODULES."""
-    # Allow submodule access for allowed top-level modules
+    """Import function that only allows modules in ALLOWED_MODULES.
+
+    Checks BLOCKED_MODULES first for an explicit deny, then verifies
+    the module is in ALLOWED_MODULES.
+    """
     top_level = name.split(".")[0]
+
+    # Explicit blocklist — checked first so blocked modules can never
+    # slip through even if someone adds them to ALLOWED_MODULES.
+    if name in BLOCKED_MODULES or top_level in BLOCKED_MODULES:
+        raise GeneImportError(
+            f"gene cannot import '{name}' — module is blocked"
+        )
+
+    # Allow submodule access for allowed top-level modules
     if name not in ALLOWED_MODULES and top_level not in ALLOWED_MODULES:
         raise GeneImportError(
             f"gene cannot import '{name}' — not in allowed modules: "

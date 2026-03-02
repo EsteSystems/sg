@@ -13,7 +13,10 @@ import re
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
+from sg.log import get_logger
 from sg.parser.types import TopologyContract, TopologyResource
+
+logger = get_logger("topology")
 
 
 @dataclass
@@ -146,8 +149,8 @@ def execute_topology(
     preserve = topology.on_failure == "preserve what works"
 
     for step in steps:
-        print(f"  [topology] {step.resource_name}: "
-              f"{step.action} → {step.target}")
+        logger.info("%s: %s -> %s", step.resource_name,
+                    step.action, step.target)
         try:
             if step.action == "pathway":
                 step_outputs = orchestrator.run_pathway(
@@ -178,7 +181,7 @@ def execute_topology(
 
         except Exception as e:
             msg = f"resource '{step.resource_name}' failed: {e}"
-            print(f"  [topology] {msg}")
+            logger.error("%s", msg)
             if preserve:
                 errors.append(msg)
             else:

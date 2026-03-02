@@ -28,6 +28,7 @@ from sg.decomposition import DecompositionDetector
 from sg.pathway_fitness import PathwayFitnessTracker
 from sg.pathway_registry import PathwayRegistry, steps_from_pathway, compute_structure_sha
 from sg import pathway_arena
+from sg.pathway_mutation import PathwayMutationThrottle
 from sg.regression import RegressionDetector
 from sg.verify import VerifyScheduler, parse_duration
 
@@ -66,6 +67,7 @@ class Orchestrator:
         self.decomposition_detector = DecompositionDetector.open(self._decomposition_path)
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
         self._current_pathway_context: str | None = None
+        self._pathway_mutation_throttle = self._load_pathway_mutation_throttle()
 
     def _audit(self, event: str, locus: str = "", sha: str = "",
                 **details) -> None:
@@ -702,6 +704,9 @@ class Orchestrator:
                 )
                 continue
 
+        # Attempt pathway mutation before giving up
+        self._try_pathway_mutation(pathway_name, default_pathway)
+
         raise RuntimeError(
             f"pathway '{pathway_name}' failed: all pathway alleles exhausted"
         )
@@ -712,15 +717,96 @@ class Orchestrator:
         """Convert a PathwayAllele back to a runtime Pathway.
 
         For the contract-derived allele, returns the default directly.
-        For mutated alleles (Phase 5), will reconstruct from StepSpec.
+        For mutated alleles, reconstructs from StepSpec list.
         """
         default_steps = steps_from_pathway(default_pathway)
         default_sha = compute_structure_sha(default_steps)
         if pw_allele.structure_sha == default_sha:
             return default_pathway
-        logger.warning("pathway allele %s has non-default structure, "
-                       "using default pathway", pw_allele.structure_sha[:12])
-        return default_pathway
+        return self._pathway_from_stepspecs(
+            pw_allele.pathway_name, pw_allele.steps, default_pathway,
+        )
+
+    def _pathway_from_stepspecs(
+        self,
+        pathway_name: str,
+        specs: list,
+        default_pathway: Pathway,
+    ) -> Pathway:
+        """Reconstruct a runtime Pathway from a StepSpec list.
+
+        Uses the default pathway's step transforms as a lookup table.
+        For steps not present in the default, generates a param-based
+        or passthrough transform.
+        """
+        from sg.pathway import (
+            PathwayStep as RTPathwayStep, ComposedStep, LoopStep,
+            ConditionalExecStep, _make_reference_transform,
+            _make_passthrough_transform,
+        )
+
+        # Build lookup: target -> input_transform from default pathway
+        default_transforms: dict[str, object] = {}
+        for step in default_pathway.steps:
+            if isinstance(step, RTPathwayStep):
+                default_transforms[step.locus] = step.input_transform
+            elif isinstance(step, ComposedStep):
+                default_transforms[step.pathway_name] = step.input_transform
+
+        steps = []
+        for spec in specs:
+            if spec.step_type == "locus":
+                transform = default_transforms.get(spec.target)
+                if transform is None:
+                    transform = (
+                        _make_reference_transform(spec.params)
+                        if spec.params
+                        else _make_passthrough_transform()
+                    )
+                steps.append(RTPathwayStep(
+                    locus=spec.target, input_transform=transform,
+                ))
+            elif spec.step_type == "composed":
+                transform = default_transforms.get(spec.target)
+                if transform is None:
+                    transform = (
+                        _make_reference_transform(spec.params)
+                        if spec.params
+                        else _make_passthrough_transform()
+                    )
+                steps.append(ComposedStep(
+                    pathway_name=spec.target, input_transform=transform,
+                ))
+            elif spec.step_type == "loop":
+                steps.append(LoopStep(
+                    variable=spec.loop_variable or "",
+                    iterable_field=spec.loop_iterable or "",
+                    body_locus=spec.target,
+                    body_params=spec.params,
+                ))
+            elif spec.step_type == "conditional":
+                branches: dict[str, RTPathwayStep | ComposedStep] = {}
+                if spec.branches:
+                    for value, branch_info in spec.branches.items():
+                        bt = branch_info.get("step_type", "locus")
+                        bt_target = branch_info.get("target", "")
+                        if bt == "composed":
+                            branches[value] = ComposedStep(
+                                pathway_name=bt_target,
+                                input_transform=_make_passthrough_transform(),
+                            )
+                        else:
+                            branches[value] = RTPathwayStep(
+                                locus=bt_target,
+                                input_transform=_make_passthrough_transform(),
+                            )
+                steps.append(ConditionalExecStep(
+                    condition_step_index=spec.condition_step_index or 0,
+                    condition_field=spec.condition_field or "",
+                    branches=branches,
+                ))
+
+        return Pathway(name=pathway_name, steps=steps)
 
     def _check_pathway_promotion(self, pathway_name: str, sha: str) -> None:
         if self.pathway_registry is None:
@@ -752,6 +838,125 @@ class Orchestrator:
                         extra={"pathway": pathway_name, "sha": sha[:12],
                                "event": "pathway_demotion"})
             self._audit("pathway_demotion", locus=pathway_name, sha=sha)
+
+    def _load_pathway_mutation_throttle(self) -> PathwayMutationThrottle:
+        """Load pathway mutation throttle from disk or create fresh."""
+        throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
+        if throttle_path.exists():
+            data = json.loads(throttle_path.read_text())
+            throttle = PathwayMutationThrottle.from_dict(data)
+        else:
+            throttle = PathwayMutationThrottle()
+        cooldown_env = os.environ.get("SG_PATHWAY_MUTATION_COOLDOWN")
+        if cooldown_env is not None:
+            throttle.cooldown_seconds = float(cooldown_env) * 3600
+        return throttle
+
+    def _try_pathway_mutation(
+        self, pathway_name: str, default_pathway: Pathway,
+    ) -> str | None:
+        """Attempt structural mutation on a pathway. Returns new SHA if registered."""
+        if self.pathway_registry is None:
+            return None
+        if self.pathway_fitness_tracker is None:
+            return None
+        if not self._pathway_mutation_throttle.can_mutate(pathway_name):
+            logger.info("pathway mutation throttled for '%s'", pathway_name)
+            return None
+        if not self._is_structural_problem(pathway_name):
+            return None
+
+        ctx = self._build_pathway_mutation_context(pathway_name)
+        if ctx is None:
+            return None
+
+        from sg.pathway_mutation import select_operator, default_operators
+        operators = default_operators(mutation_engine=self.mutation_engine)
+        result = select_operator(ctx, operators)
+        if result is None:
+            return None
+
+        dominant_sha = self.phenotype.get_pathway_dominant(pathway_name)
+        new_sha = self.pathway_registry.register(
+            pathway_name, result.new_steps,
+            parent_sha=dominant_sha,
+            mutation_operator=result.operator_name,
+        )
+        self.phenotype.add_pathway_fallback(pathway_name, new_sha)
+        self._pathway_mutation_throttle.record_mutation(pathway_name)
+        self._audit("pathway_mutation", locus=pathway_name, sha=new_sha,
+                    operator=result.operator_name, rationale=result.rationale)
+        logger.info(
+            "registered pathway mutation for '%s': %s (operator: %s)",
+            pathway_name, new_sha[:12], result.operator_name,
+            extra={"pathway": pathway_name, "sha": new_sha[:12],
+                   "event": "pathway_mutation"},
+        )
+        return new_sha
+
+    def _is_structural_problem(self, pathway_name: str) -> bool:
+        """Detect structural problem: gene fitness high but pathway fitness low."""
+        pathway_fitness = self.pathway_fitness_tracker.compute_fitness(pathway_name)
+        if pathway_fitness > 0.7:
+            return False
+
+        pathway_contract = self.contract_store.get_pathway(pathway_name)
+        if pathway_contract is None:
+            return False
+
+        from sg.parser.types import PathwayStep as ASTPathwayStep
+        gene_fitnesses = []
+        for step in pathway_contract.steps:
+            if isinstance(step, ASTPathwayStep) and not step.is_pathway_ref:
+                dominant_sha = self.phenotype.get_dominant(step.locus)
+                if dominant_sha:
+                    allele = self.registry.get(dominant_sha)
+                    if allele:
+                        gene_fitnesses.append(arena.compute_fitness(allele))
+
+        if not gene_fitnesses:
+            return False
+
+        avg_gene_fitness = sum(gene_fitnesses) / len(gene_fitnesses)
+        return avg_gene_fitness > 0.7 and pathway_fitness < 0.5
+
+    def _build_pathway_mutation_context(self, pathway_name: str):
+        """Assemble the full mutation context for a pathway."""
+        from sg.pathway_mutation import PathwayMutationContext
+
+        pathway_contract = self.contract_store.get_pathway(pathway_name)
+        dominant_sha = self.phenotype.get_pathway_dominant(pathway_name)
+        if dominant_sha is None:
+            return None
+        pw_allele = self.pathway_registry.get(dominant_sha)
+        if pw_allele is None:
+            return None
+
+        per_step_fitness: dict[str, float] = {}
+        gene_fitness_map: dict[str, float] = {}
+        for locus in self.contract_store.known_loci():
+            dom = self.phenotype.get_dominant(locus)
+            if dom:
+                allele = self.registry.get(dom)
+                if allele:
+                    fitness = arena.compute_fitness(allele)
+                    gene_fitness_map[locus] = fitness
+                    per_step_fitness[locus] = fitness
+
+        return PathwayMutationContext(
+            pathway_name=pathway_name,
+            current_steps=pw_allele.steps,
+            pathway_fitness=self.pathway_fitness_tracker.compute_fitness(pathway_name),
+            per_step_fitness=per_step_fitness,
+            timing_anomalies=self.pathway_fitness_tracker.get_timing_anomalies(pathway_name),
+            failure_distribution=self.pathway_fitness_tracker.get_failure_distribution(pathway_name),
+            input_clusters=self.pathway_fitness_tracker.get_input_clusters(pathway_name),
+            available_loci=self.contract_store.known_loci(),
+            available_pathways=self.contract_store.known_pathways(),
+            gene_fitness_map=gene_fitness_map,
+            contract=pathway_contract,
+            contract_store=self.contract_store,
+        )
 
     def _rollback_pathway_resources(
         self, resources_before: set[tuple[str, str]]
@@ -798,4 +1003,8 @@ class Orchestrator:
             self.pathway_fitness_tracker.save(fitness_path)
         if self.pathway_registry is not None:
             self.pathway_registry.save_index()
+        throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
+        throttle_path.write_text(json.dumps(
+            self._pathway_mutation_throttle.to_dict(), indent=2,
+        ))
         self.decomposition_detector.save(self._decomposition_path)

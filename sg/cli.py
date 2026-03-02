@@ -458,6 +458,13 @@ def cmd_status(args: argparse.Namespace) -> None:
         if pw_alleles:
             print(f"  Pathway alleles: {len(pw_alleles)}"
                   f"  dominant={pw_dominant_sha[:12] if pw_dominant_sha else 'none'}")
+            for pa in pw_alleles:
+                marker = " *" if pa.structure_sha == pw_dominant_sha else ""
+                op_info = f"  (via {pa.mutation_operator})" if pa.mutation_operator else ""
+                print(f"    {pa.structure_sha[:12]}  "
+                      f"fitness={pa.fitness:.3f}  "
+                      f"execs={pa.total_executions}  "
+                      f"state={pa.state}{marker}{op_info}")
         if fusion_config and fusion_config.fused_sha:
             print(f"  Fused: {fusion_config.fused_sha[:12]}")
         else:

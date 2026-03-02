@@ -81,6 +81,23 @@ class MutationEngine(ABC):
         """
         raise NotImplementedError("this engine does not support decomposition")
 
+    def propose_pathway_insertion(
+        self,
+        pathway_name: str,
+        steps: list[dict],
+        problem_step_index: int,
+        problem_step_name: str,
+        failure_distribution: dict[str, float],
+        available_loci: list[str],
+        input_clusters: list[dict],
+    ) -> dict | None:
+        """Propose an insertion into a pathway to fix structural failures.
+
+        Returns a dict with keys: locus, insert_before_index, params, rationale.
+        Or None if no insertion is appropriate.
+        """
+        raise NotImplementedError("this engine does not support pathway insertion")
+
 
 class MockMutationEngine(MutationEngine):
     """Loads fixture files as mutation results. For development/testing."""
@@ -143,6 +160,22 @@ class MockMutationEngine(MutationEngine):
             sub_gene_seed_sources=sub_seeds,
             original_locus=locus,
         )
+
+    def propose_pathway_insertion(
+        self,
+        pathway_name: str,
+        steps: list[dict],
+        problem_step_index: int,
+        problem_step_name: str,
+        failure_distribution: dict[str, float],
+        available_loci: list[str],
+        input_clusters: list[dict],
+    ) -> dict | None:
+        import json as _json
+        fixture_path = self.fixtures_dir / f"{pathway_name}_insertion.json"
+        if not fixture_path.exists():
+            return None
+        return _json.loads(fixture_path.read_text())
 
 
 class LLMMutationEngine(MutationEngine):
@@ -546,6 +579,72 @@ Each sub-gene must define `execute(input_json: str) -> str` and use `gene_sdk`."
             sub_gene_seed_sources=sub_seeds,
             original_locus=locus,
         )
+
+    def propose_pathway_insertion(
+        self,
+        pathway_name: str,
+        steps: list[dict],
+        problem_step_index: int,
+        problem_step_name: str,
+        failure_distribution: dict[str, float],
+        available_loci: list[str],
+        input_clusters: list[dict],
+    ) -> dict | None:
+        import json as _json
+        system_ctx = self._system_context()
+        steps_desc = _json.dumps(steps, indent=2)
+        fail_desc = _json.dumps(failure_distribution, indent=2)
+        loci_list = "\n".join(f"  - {l}" for l in available_loci[:30])
+
+        clusters_desc = ""
+        if input_clusters:
+            clusters_desc = "\n## Input failure clusters:\n"
+            for c in input_clusters[:5]:
+                clusters_desc += (
+                    f"  Step: {c.get('failure_step', '?')}, "
+                    f"count: {c.get('count', 0)}\n"
+                )
+
+        prompt = f"""You are a pathway mutation engine for the Software Genomics runtime.
+
+{system_ctx}
+
+## Pathway: {pathway_name}
+
+## Current step structure:
+{steps_desc}
+
+## Failure distribution by step:
+{fail_desc}
+
+## Problem: Step {problem_step_index} ({problem_step_name}) fails persistently \
+despite gene-level fitness being high. This suggests a missing precondition or setup step.
+
+## Available loci for insertion:
+{loci_list}
+{clusters_desc}
+## Task
+Propose a locus to INSERT into the pathway to resolve the structural failure.
+
+Respond with a JSON object:
+{{
+  "locus": "<locus_name to insert>",
+  "insert_before_index": <0-based index>,
+  "params": {{}},
+  "rationale": "<brief explanation>"
+}}
+
+Return ONLY the JSON object, no markdown fences."""
+
+        text = self._call_api(prompt).strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
+        try:
+            return _json.loads(text)
+        except _json.JSONDecodeError:
+            logger.warning("LLM pathway insertion response not valid JSON")
+            return None
 
 
 class ClaudeMutationEngine(LLMMutationEngine):

@@ -6,23 +6,25 @@ from pathlib import Path
 
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine
 from sg.orchestrator import Orchestrator
 from sg.parser.parser import parse_sg
 from sg.parser.types import TopologyContract, TopologyResource
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
-from sg.kernel.network_mappers import NETWORK_RESOURCE_MAPPERS
+from sg_network import NETWORK_RESOURCE_MAPPERS
 from sg.topology import (
     TopologyStep, decompose, execute_topology,
     _build_dependency_graph, _topological_sort,
 )
 
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
-GENES_DIR = Path(__file__).parent.parent / "genes"
-FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+import sg_network
+
+CONTRACTS_DIR = sg_network.contracts_path()
+GENES_DIR = sg_network.genes_path()
+FIXTURES_DIR = sg_network.fixtures_path()
 
 
 # --- Decomposition unit tests ---

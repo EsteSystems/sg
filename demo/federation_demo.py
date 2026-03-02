@@ -32,15 +32,17 @@ from sg.federation import (
     PeerConfig, export_allele, import_allele, push_allele, pull_alleles,
 )
 from sg.fusion import FusionTracker
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine
 from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
-CONTRACTS_DIR = PROJECT_ROOT / "contracts"
-GENES_DIR = PROJECT_ROOT / "genes"
-FIXTURES_DIR = PROJECT_ROOT / "fixtures"
+import sg_network
+
+CONTRACTS_DIR = sg_network.contracts_path()
+GENES_DIR = sg_network.genes_path()
+FIXTURES_DIR = sg_network.fixtures_path()
 
 
 def setup_organism(name: str, base_dir: Path, loci: list[str]) -> Path:

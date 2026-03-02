@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 from sg.contracts import ContractStore, validate_output
 
+import sg_network
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
+CONTRACTS_DIR = sg_network.contracts_path()
 
 
 @pytest.fixture

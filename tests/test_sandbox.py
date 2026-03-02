@@ -3,7 +3,8 @@ import json
 import pytest
 from pathlib import Path
 
-from sg.kernel.mock import MockNetworkKernel
+import sg_network
+from sg_network import MockNetworkKernel
 from sg.loader import load_gene, call_gene
 from sg.sandbox import (
     make_sandbox_globals, execute_with_timeout,
@@ -12,7 +13,7 @@ from sg.sandbox import (
 )
 
 
-GENES_DIR = Path(__file__).parent.parent / "genes"
+GENES_DIR = sg_network.genes_path()
 
 
 @pytest.fixture

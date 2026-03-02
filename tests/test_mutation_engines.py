@@ -12,8 +12,9 @@ from sg.mutation import (
 )
 from sg.contracts import ContractStore
 
+import sg_network
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
+CONTRACTS_DIR = sg_network.contracts_path()
 
 
 @pytest.fixture

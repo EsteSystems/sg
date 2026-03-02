@@ -5,7 +5,7 @@ import pytest
 from sg.cli import make_kernel
 from sg.kernel.base import Kernel
 from sg.kernel.stub import StubKernel
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 
 
 class TestKernelSelection:
@@ -37,14 +37,14 @@ class TestKernelSelection:
         """--kernel=production creates ProductionNetworkKernel."""
         args = argparse.Namespace(kernel="production")
         kernel = make_kernel(args)
-        from sg.kernel.production import ProductionNetworkKernel
+        from sg_network import ProductionNetworkKernel
         assert isinstance(kernel, ProductionNetworkKernel)
 
     def test_network_production_alias(self):
         """--kernel=network-production creates ProductionNetworkKernel."""
         args = argparse.Namespace(kernel="network-production")
         kernel = make_kernel(args)
-        from sg.kernel.production import ProductionNetworkKernel
+        from sg_network import ProductionNetworkKernel
         assert isinstance(kernel, ProductionNetworkKernel)
 
     def test_unknown_kernel_exits(self, capsys):

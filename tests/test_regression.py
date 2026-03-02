@@ -7,7 +7,8 @@ from pathlib import Path
 from sg import arena
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
-from sg.kernel.mock import MockNetworkKernel
+import sg_network
+from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine
 from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap
@@ -18,9 +19,9 @@ from sg.regression import (
 from sg.registry import Registry, AlleleMetadata
 
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
-GENES_DIR = Path(__file__).parent.parent / "genes"
-FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+CONTRACTS_DIR = sg_network.contracts_path()
+GENES_DIR = sg_network.genes_path()
+FIXTURES_DIR = sg_network.fixtures_path()
 
 
 class TestRegressionDetector:

@@ -4,18 +4,19 @@ import shutil
 import pytest
 from pathlib import Path
 
+import sg_network
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker, FUSION_THRESHOLD
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine
 from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
 
-FIXTURE_DIR = Path(__file__).parent.parent / "fixtures"
-GENES_DIR = Path(__file__).parent.parent / "genes"
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
+FIXTURE_DIR = sg_network.fixtures_path()
+GENES_DIR = sg_network.genes_path()
+CONTRACTS_DIR = sg_network.contracts_path()
 
 
 @pytest.fixture

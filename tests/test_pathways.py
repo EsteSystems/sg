@@ -4,9 +4,10 @@ import shutil
 import pytest
 from pathlib import Path
 
+import sg_network
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine
 from sg.orchestrator import Orchestrator
 from sg.parser.parser import parse_sg
@@ -23,9 +24,9 @@ from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
-GENES_DIR = Path(__file__).parent.parent / "genes"
-FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+CONTRACTS_DIR = sg_network.contracts_path()
+GENES_DIR = sg_network.genes_path()
+FIXTURES_DIR = sg_network.fixtures_path()
 
 
 # --- Parser tests for new step types ---

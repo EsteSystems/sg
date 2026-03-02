@@ -10,10 +10,10 @@ from sg.fusion import FusionTracker
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 from sg.snapshot import SnapshotManager, SnapshotMeta
+import sg_network
 
-
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
-GENES_DIR = Path(__file__).parent.parent / "genes"
+CONTRACTS_DIR = sg_network.contracts_path()
+GENES_DIR = sg_network.genes_path()
 
 
 @pytest.fixture

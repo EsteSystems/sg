@@ -33,7 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from sg import arena
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
-from sg.kernel.production import ProductionNetworkKernel
+from sg_network.production import ProductionNetworkKernel
 from sg.mutation import (
     LLMMutationEngine, ClaudeMutationEngine,
     OpenAIMutationEngine, DeepSeekMutationEngine,
@@ -98,7 +98,8 @@ def run_demo(locus: str, model: str | None = None, dry_run: bool = False):
 
     with tempfile.TemporaryDirectory(prefix="sg-prod-demo-") as tmp:
         tmp_dir = Path(tmp)
-        shutil.copytree(PROJECT_ROOT / "contracts", tmp_dir / "contracts")
+        import sg_network
+        shutil.copytree(sg_network.contracts_path(), tmp_dir / "contracts")
         (tmp_dir / "fixtures").mkdir()
 
         contract_store = ContractStore.open(tmp_dir / "contracts")

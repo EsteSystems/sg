@@ -13,7 +13,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from sg.kernel.base import NetworkKernel
+from sg_network.kernel import NetworkKernel
 
 
 SAFETY_PREFIX = "sg-test-"
@@ -27,7 +27,7 @@ class ProductionNetworkKernel(NetworkKernel):
 
     def create_shadow(self) -> NetworkKernel:
         """Return a mock kernel for shadow execution."""
-        from sg.kernel.mock import MockNetworkKernel
+        from sg_network.mock import MockNetworkKernel
         return MockNetworkKernel()
 
     def __init__(self, use_sudo: bool = True, dry_run: bool = False) -> None:

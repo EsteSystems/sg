@@ -35,11 +35,11 @@ def main():
     # Always protect management interfaces — set BEFORE importing production kernel
     os.environ["SG_PROTECTED_INTERFACES"] = "vswitch0,em1,em2,vswitch1,vswitch2,vswitch3,cni0,virbr0"
 
-    from sg.kernel.production import ProductionNetworkKernel, PROTECTED_INTERFACES
+    from sg_network.production import ProductionNetworkKernel, PROTECTED_INTERFACES
     from sg.snapshot import SnapshotManager
     from sg.contracts import ContractStore
     from sg.fusion import FusionTracker
-    from sg.kernel.mock import MockNetworkKernel
+    from sg_network import MockNetworkKernel
     from sg.mutation import MockMutationEngine
     from sg.orchestrator import Orchestrator
     from sg.phenotype import PhenotypeMap

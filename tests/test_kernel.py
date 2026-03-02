@@ -1,6 +1,6 @@
 """Tests for MockNetworkKernel — full network simulation."""
 import pytest
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 
 
 @pytest.fixture

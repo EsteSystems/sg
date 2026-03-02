@@ -11,7 +11,7 @@ import platform
 import subprocess
 import pytest
 
-from sg.kernel.production import ProductionNetworkKernel, SAFETY_PREFIX
+from sg_network.production import ProductionNetworkKernel, SAFETY_PREFIX
 
 
 def _has_sudo() -> bool:

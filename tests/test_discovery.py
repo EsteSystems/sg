@@ -4,7 +4,7 @@ import pytest
 
 from sg.kernel.base import Kernel
 from sg.kernel.stub import StubKernel
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.kernel.discovery import (
     discover_kernels,
     list_kernel_names,
@@ -53,12 +53,12 @@ class TestLoadKernel:
         assert isinstance(kernel, MockNetworkKernel)
 
     def test_load_production(self):
-        from sg.kernel.production import ProductionNetworkKernel
+        from sg_network import ProductionNetworkKernel
         kernel = load_kernel("production")
         assert isinstance(kernel, ProductionNetworkKernel)
 
     def test_load_network_production(self):
-        from sg.kernel.production import ProductionNetworkKernel
+        from sg_network import ProductionNetworkKernel
         kernel = load_kernel("network-production")
         assert isinstance(kernel, ProductionNetworkKernel)
 

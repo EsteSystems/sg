@@ -9,13 +9,14 @@ from sg.conformance import (
     ConformanceSuite, ConformanceResult, Check, _type_matches,
 )
 from sg.contracts import ContractStore
-from sg.kernel.mock import MockNetworkKernel
+import sg_network
+from sg_network import MockNetworkKernel
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
-GENES_DIR = Path(__file__).parent.parent / "genes"
+CONTRACTS_DIR = sg_network.contracts_path()
+GENES_DIR = sg_network.genes_path()
 
 
 @pytest.fixture

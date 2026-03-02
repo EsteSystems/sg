@@ -15,24 +15,22 @@ claude = ["httpx>=0.27"]
 openai = ["httpx>=0.27"]
 deepseek = ["httpx>=0.27"]
 federation = ["httpx>=0.27"]
-all = ["software-genomics[dashboard,claude,openai,deepseek,federation]"]
-dev = ["pytest>=8.0"]
+network = ["sg-network>=0.2.0"]
+all = ["software-genomics[dashboard,claude,openai,deepseek,federation,network]"]
+dev = ["pytest>=8.0", "sg-network>=0.2.0"]
 
 [project.scripts]
 sg = "sg.cli:main"
 
 [project.entry-points."sg.kernels"]
 stub = "sg.kernel.stub:StubKernel"
-mock = "sg.kernel.mock:MockNetworkKernel"
-network-mock = "sg.kernel.mock:MockNetworkKernel"
-production = "sg.kernel.production:ProductionNetworkKernel"
-network-production = "sg.kernel.production:ProductionNetworkKernel"
 
 [project.urls]
 Repository = "https://github.com/EsteSystems/sg"
 
 [tool.setuptools.packages.find]
 include = ["sg*"]
+exclude = ["sg_network*"]
 
 [build-system]
 requires = ["setuptools>=68"]

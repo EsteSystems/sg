@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from sg.kernel.base import NetworkKernel
+from sg_network.kernel import NetworkKernel
 
 
 @dataclass

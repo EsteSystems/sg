@@ -11,7 +11,9 @@ from sg.parser.types import (
 )
 
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
+import sg_network
+
+CONTRACTS_DIR = sg_network.contracts_path()
 
 
 # --- Lexer tests ---
@@ -537,7 +539,7 @@ topology production_server
         """All existing .sg contracts parse with domain=None."""
         from pathlib import Path
         from sg.contracts import ContractStore
-        contracts_dir = Path(__file__).parent.parent / "contracts"
+        contracts_dir = sg_network.contracts_path()
         store = ContractStore.open(contracts_dir)
         for name, gene in store.genes.items():
             assert gene.domain is None, f"gene {name} has unexpected domain"

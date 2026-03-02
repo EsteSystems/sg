@@ -8,9 +8,10 @@ from sg.contracts import ContractStore
 from sg.mutation import MockMutationEngine, MutationEngine
 from sg.parser.parser import parse_sg
 
+import sg_network
 
-CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
-FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
+CONTRACTS_DIR = sg_network.contracts_path()
+FIXTURES_DIR = sg_network.fixtures_path()
 
 
 class TestGenerateContract:

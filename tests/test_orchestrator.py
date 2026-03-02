@@ -4,7 +4,7 @@ import pytest
 
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine, MutationEngine, MutationContext
 from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap

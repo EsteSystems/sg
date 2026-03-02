@@ -31,7 +31,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from sg import arena
 from sg.contracts import ContractStore
 from sg.fusion import FusionTracker
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.mutation import (
     LLMMutationEngine, ClaudeMutationEngine,
     OpenAIMutationEngine, DeepSeekMutationEngine,
@@ -122,7 +122,8 @@ def detect_engine(
 def setup_project(tmp_dir: Path, locus: str) -> Path:
     """Set up a minimal project in tmp_dir with a broken gene."""
     # Copy contracts
-    shutil.copytree(PROJECT_ROOT / "contracts", tmp_dir / "contracts")
+    import sg_network
+    shutil.copytree(sg_network.contracts_path(), tmp_dir / "contracts")
 
     # Create empty fixtures dir (no mock fallbacks — forces real mutation)
     (tmp_dir / "fixtures").mkdir()
@@ -146,7 +147,7 @@ def setup_project(tmp_dir: Path, locus: str) -> Path:
 
     # For bridge_stp, we also need a working bridge_create to set up the bridge
     if locus == "bridge_stp":
-        good_source = (PROJECT_ROOT / "genes" / "bridge_create_v1.py").read_text()
+        good_source = (sg_network.genes_path() / "bridge_create_v1.py").read_text()
         sha2 = registry.register(good_source, "bridge_create")
         phenotype.promote("bridge_create", sha2)
         allele2 = registry.get(sha2)

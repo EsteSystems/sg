@@ -1,7 +1,7 @@
 """Tests for gene loading via exec()."""
 import json
 import pytest
-from sg.kernel.mock import MockNetworkKernel
+from sg_network import MockNetworkKernel
 from sg.loader import load_gene, call_gene
 
 

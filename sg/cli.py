@@ -13,6 +13,7 @@ from sg.log import configure_logging
 from sg.contracts import ContractStore, validate_output
 from sg.fusion import FusionTracker
 from sg.kernel.discovery import load_kernel, list_kernel_names, KernelNotFoundError, KernelLoadError
+from sg.pathway_fitness import PathwayFitnessTracker
 from sg.mutation import MockMutationEngine, MutationEngine
 from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap
@@ -104,6 +105,7 @@ def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
+    pathway_fitness_tracker = PathwayFitnessTracker.open(root / "pathway_fitness.json")
     kernel = make_kernel(args)
     mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
 
@@ -115,6 +117,7 @@ def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
         kernel=kernel,
         contract_store=contract_store,
         project_root=root,
+        pathway_fitness_tracker=pathway_fitness_tracker,
     )
 
 
@@ -394,6 +397,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
+    pathway_fitness_tracker = PathwayFitnessTracker.open(root / "pathway_fitness.json")
 
     print("=== Software Genome Status ===\n")
 
@@ -414,6 +418,7 @@ def cmd_status(args: argparse.Namespace) -> None:
     for name in contract_store.known_pathways():
         fusion_config = phenotype.get_fused(name)
         track = fusion_tracker.get_track(name)
+        fitness_rec = pathway_fitness_tracker.get_record(name)
         print(f"Pathway: {name}")
         if fusion_config and fusion_config.fused_sha:
             print(f"  Fused: {fusion_config.fused_sha[:12]}")
@@ -422,6 +427,26 @@ def cmd_status(args: argparse.Namespace) -> None:
         if track:
             print(f"  Reinforcement: {track.reinforcement_count}/{10}")
             print(f"  Total: {track.total_successes} successes, {track.total_failures} failures")
+        if fitness_rec:
+            fitness = pathway_fitness_tracker.compute_fitness(name)
+            print(f"  Fitness: {fitness:.3f}")
+            print(f"  Executions: {fitness_rec.total_executions} "
+                  f"({fitness_rec.successful_executions}ok/"
+                  f"{fitness_rec.failed_executions}fail)")
+            print(f"  Avg time: {fitness_rec.avg_execution_time_ms:.1f}ms")
+            if fitness_rec.consecutive_failures > 0:
+                print(f"  Consecutive failures: {fitness_rec.consecutive_failures}")
+            fail_dist = pathway_fitness_tracker.get_failure_distribution(name)
+            if fail_dist:
+                print(f"  Failure hotspots:")
+                for step, prob in sorted(fail_dist.items(), key=lambda x: -x[1]):
+                    print(f"    {step}: {prob:.0%}")
+            anomalies = pathway_fitness_tracker.get_timing_anomalies(name)
+            if anomalies:
+                print(f"  Timing anomalies:")
+                for a in anomalies:
+                    print(f"    {a.step_name}: {a.latest_ms:.1f}ms "
+                          f"(avg {a.avg_ms:.1f}ms, {a.ratio:.1f}x)")
         print()
 
 

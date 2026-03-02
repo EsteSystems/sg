@@ -24,6 +24,7 @@ from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contr
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 from sg.safety import Transaction, SafeKernel, requires_transaction, is_shadow_only, SHADOW_PROMOTION_THRESHOLD
+from sg.pathway_fitness import PathwayFitnessTracker
 from sg.regression import RegressionDetector
 from sg.verify import VerifyScheduler, parse_duration
 
@@ -42,6 +43,7 @@ class Orchestrator:
         contract_store: ContractStore,
         project_root: Path,
         audit_log: AuditLog | None = None,
+        pathway_fitness_tracker: PathwayFitnessTracker | None = None,
     ):
         self.registry = registry
         self.phenotype = phenotype
@@ -51,6 +53,7 @@ class Orchestrator:
         self.contract_store = contract_store
         self.project_root = project_root
         self.audit_log = audit_log
+        self.pathway_fitness_tracker = pathway_fitness_tracker
         self.verify_scheduler = VerifyScheduler()
         self._regression_path = project_root / ".sg" / "regression.json"
         self.regression_detector = RegressionDetector.open(self._regression_path)
@@ -532,6 +535,7 @@ class Orchestrator:
                 self.fusion_tracker, self.registry,
                 self.phenotype, self.mutation_engine,
                 self.kernel,
+                pathway_fitness_tracker=self.pathway_fitness_tracker,
             )
         except RuntimeError:
             if on_failure == "rollback all":
@@ -582,3 +586,6 @@ class Orchestrator:
         self.phenotype.save(phenotype_path)
         tracker_path = self.project_root / "fusion_tracker.json"
         self.fusion_tracker.save(tracker_path)
+        if self.pathway_fitness_tracker is not None:
+            fitness_path = self.project_root / "pathway_fitness.json"
+            self.pathway_fitness_tracker.save(fitness_path)

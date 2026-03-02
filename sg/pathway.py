@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Union
 
 from sg.kernel.base import Kernel
-from sg.fusion import FusionTracker, fuse_pathway, try_fused_execution
+from sg.fusion import FusionTracker, composition_fingerprint, fuse_pathway, try_fused_execution
 from sg.log import get_logger
 from sg.mutation import MutationEngine
 from sg.phenotype import PhenotypeMap
@@ -67,6 +68,19 @@ class ConditionalExecStep:
 RuntimeStep = Union[PathwayStep, ComposedStep, LoopStep, ConditionalExecStep]
 
 
+def _step_name(step: RuntimeStep) -> str:
+    """Extract a human-readable name from a runtime step."""
+    if isinstance(step, PathwayStep):
+        return step.locus
+    elif isinstance(step, ComposedStep):
+        return f"pathway:{step.pathway_name}"
+    elif isinstance(step, LoopStep):
+        return f"for:{step.body_locus}"
+    elif isinstance(step, ConditionalExecStep):
+        return f"when:{step.condition_field}"
+    return "unknown"
+
+
 @dataclass
 class Pathway:
     name: str
@@ -82,53 +96,102 @@ def execute_pathway(
     phenotype: PhenotypeMap,
     mutation_engine: MutationEngine,
     kernel: Kernel,
+    pathway_fitness_tracker: object | None = None,
 ) -> list[str]:
     """Execute a pathway, returning the list of step outputs."""
     fused_result = try_fused_execution(
         pathway.name, input_json, registry, phenotype, fusion_tracker, kernel
     )
     if fused_result is not None:
+        if pathway_fitness_tracker is not None:
+            pathway_fitness_tracker.record_execution(
+                pathway_name=pathway.name,
+                steps_executed=["__fused__"],
+                step_timings={},
+                success=True,
+                failure_step=None,
+                input_json=input_json,
+            )
         return [fused_result]
 
     outputs: list[str] = []
     allele_shas: list[str] = []
+    step_timings_map: dict[str, float] = {}
+    steps_executed: list[str] = []
+    current_step: RuntimeStep | None = None
 
-    for step in pathway.steps:
-        if isinstance(step, PathwayStep):
-            result = _execute_locus_step(
-                step, input_json, outputs, orchestrator, pathway.name,
-                fusion_tracker,
-            )
-            output, used_sha = result
-            outputs.append(output)
-            allele_shas.append(used_sha)
+    try:
+        for step in pathway.steps:
+            current_step = step
+            sname = _step_name(step)
+            t0 = time.monotonic()
 
-        elif isinstance(step, ComposedStep):
-            step_input = step.input_transform(input_json, outputs)
-            sub_outputs = orchestrator.run_pathway(step.pathway_name, step_input)
-            # Flatten composed outputs — use the last output as this step's output
-            combined = sub_outputs[-1] if sub_outputs else "{}"
-            outputs.append(combined)
-            allele_shas.append(f"pathway:{step.pathway_name}")
-
-        elif isinstance(step, LoopStep):
-            loop_outputs = _execute_loop_step(
-                step, input_json, outputs, orchestrator, pathway.name,
-                fusion_tracker,
-            )
-            for loop_out, loop_sha in loop_outputs:
-                outputs.append(loop_out)
-                allele_shas.append(loop_sha)
-
-        elif isinstance(step, ConditionalExecStep):
-            result = _execute_conditional_step(
-                step, input_json, outputs, orchestrator, pathway.name,
-                fusion_tracker,
-            )
-            if result is not None:
+            if isinstance(step, PathwayStep):
+                result = _execute_locus_step(
+                    step, input_json, outputs, orchestrator, pathway.name,
+                    fusion_tracker,
+                )
                 output, used_sha = result
                 outputs.append(output)
                 allele_shas.append(used_sha)
+
+            elif isinstance(step, ComposedStep):
+                step_input = step.input_transform(input_json, outputs)
+                sub_outputs = orchestrator.run_pathway(step.pathway_name, step_input)
+                combined = sub_outputs[-1] if sub_outputs else "{}"
+                outputs.append(combined)
+                allele_shas.append(f"pathway:{step.pathway_name}")
+
+            elif isinstance(step, LoopStep):
+                loop_outputs = _execute_loop_step(
+                    step, input_json, outputs, orchestrator, pathway.name,
+                    fusion_tracker,
+                )
+                for loop_out, loop_sha in loop_outputs:
+                    outputs.append(loop_out)
+                    allele_shas.append(loop_sha)
+
+            elif isinstance(step, ConditionalExecStep):
+                result = _execute_conditional_step(
+                    step, input_json, outputs, orchestrator, pathway.name,
+                    fusion_tracker,
+                )
+                if result is not None:
+                    output, used_sha = result
+                    outputs.append(output)
+                    allele_shas.append(used_sha)
+
+            elapsed_ms = (time.monotonic() - t0) * 1000.0
+            step_timings_map[sname] = elapsed_ms
+            steps_executed.append(sname)
+
+    except RuntimeError:
+        failure_step = _step_name(current_step) if current_step is not None else None
+        if pathway_fitness_tracker is not None:
+            structure_hash = composition_fingerprint(allele_shas) if allele_shas else ""
+            pathway_fitness_tracker.record_execution(
+                pathway_name=pathway.name,
+                steps_executed=steps_executed,
+                step_timings=step_timings_map,
+                success=False,
+                failure_step=failure_step,
+                input_json=input_json,
+                structure_hash=structure_hash,
+            )
+        raise
+
+    # Record successful execution
+    if pathway_fitness_tracker is not None:
+        structure_hash = composition_fingerprint(allele_shas) if allele_shas else ""
+        pathway_fitness_tracker.record_execution(
+            pathway_name=pathway.name,
+            steps_executed=steps_executed,
+            step_timings=step_timings_map,
+            success=True,
+            failure_step=None,
+            input_json=input_json,
+            structure_hash=structure_hash,
+        )
 
     fingerprint = fusion_tracker.record_success(pathway.name, allele_shas)
     if fingerprint is not None:

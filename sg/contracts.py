@@ -235,6 +235,35 @@ def validate_output(
     return True
 
 
+# --- Pool metadata serialization ---
+
+
+def contract_to_pool_metadata(store: ContractStore, locus: str) -> dict | None:
+    """Serialize a locus contract to a dict for pool push/pull.
+
+    Returns {domain, family, takes: [{name, type, required, optional}], gives: [...]}
+    or None if the locus has no gene contract.
+    """
+    gene = store.get_gene(locus)
+    if gene is None:
+        return None
+
+    def _field_to_dict(f: FieldDef) -> dict:
+        return {
+            "name": f.name,
+            "type": f.type,
+            "required": f.required,
+            "optional": f.optional,
+        }
+
+    return {
+        "domain": gene.domain or "unknown",
+        "family": gene.family.value,
+        "takes": [_field_to_dict(f) for f in gene.takes],
+        "gives": [_field_to_dict(f) for f in gene.gives],
+    }
+
+
 # --- Contract structural compatibility ---
 
 

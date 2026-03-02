@@ -162,6 +162,31 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     registry.save_index()
     phenotype.save(root / "phenotype.toml")
+
+    # Seed from pool if requested
+    seed_pool = getattr(args, "seed_from_pool", None)
+    if seed_pool:
+        from sg.pool import PoolClient
+        client = PoolClient(root)
+        seeded_loci = set(seeds.keys())
+        pool_seeded = 0
+        for locus in contract_store.known_loci():
+            if locus in seeded_loci:
+                continue
+            shas = client.pull(locus, registry, phenotype, seed_pool)
+            if shas:
+                # Promote first pulled allele as dominant
+                phenotype.promote(locus, shas[0])
+                allele = registry.get(shas[0])
+                if allele:
+                    allele.state = "dominant"
+                pool_seeded += 1
+                print(f"  seeded {locus} from pool → {shas[0][:12]}")
+        if pool_seeded:
+            registry.save_index()
+            phenotype.save(root / "phenotype.toml")
+        print(f"Seeded {pool_seeded} locus/loci from pool '{seed_pool}'")
+
     print("Genome initialized.")
 
 
@@ -778,12 +803,24 @@ def cmd_pool(args: argparse.Namespace) -> None:
     from sg.pool import PoolClient
 
     root = get_project_root()
-    client = PoolClient(root)
 
     subcmd = getattr(args, "pool_command", None)
     if subcmd is None:
-        print("usage: sg pool {list,push,pull,auto}")
+        print("usage: sg pool {list,push,pull,auto,serve}")
         return
+
+    if subcmd == "serve":
+        from sg.pool_server import run_pool_server
+        data_dir = Path(getattr(args, "data_dir", str(root / ".sg" / "pool")))
+        host = getattr(args, "host", "127.0.0.1")
+        port = getattr(args, "port", 9420)
+        token = getattr(args, "token", None)
+        reciprocity_val = getattr(args, "reciprocity", 1)
+        run_pool_server(data_dir, host=host, port=port,
+                        token=token, reciprocity=reciprocity_val)
+        return
+
+    client = PoolClient(root)
 
     if subcmd == "list":
         pools = client.list_pools()
@@ -805,18 +842,20 @@ def cmd_pool(args: argparse.Namespace) -> None:
     elif subcmd == "push":
         registry = Registry.open(root / ".sg" / "registry")
         phenotype = PhenotypeMap.load(root / "phenotype.toml")
+        contract_store = load_contract_store(root)
         pool_name = args.pool
 
         if getattr(args, "all", False):
-            contract_store = load_contract_store(root)
             pushed = 0
             for locus in contract_store.known_loci():
-                if client.push(locus, registry, phenotype, pool_name):
+                if client.push(locus, registry, phenotype, pool_name,
+                               contract_store=contract_store):
                     print(f"  pushed {locus}")
                     pushed += 1
             print(f"Pushed {pushed} allele(s) to '{pool_name}'")
         else:
-            if client.push(args.locus, registry, phenotype, pool_name):
+            if client.push(args.locus, registry, phenotype, pool_name,
+                           contract_store=contract_store):
                 print(f"Pushed {args.locus} to '{pool_name}'")
             else:
                 print(f"Push failed for {args.locus} (not eligible or error)")
@@ -828,8 +867,12 @@ def cmd_pool(args: argparse.Namespace) -> None:
         registry = Registry.open(root / ".sg" / "registry")
         phenotype = PhenotypeMap.load(root / "phenotype.toml")
         pool_name = args.pool
+        cross_domain = getattr(args, "cross_domain", False)
+        contract_store = load_contract_store(root) if cross_domain else None
 
-        shas = client.pull(args.locus, registry, phenotype, pool_name)
+        shas = client.pull(args.locus, registry, phenotype, pool_name,
+                           cross_domain=cross_domain,
+                           contract_store=contract_store)
         if shas:
             for sha in shas:
                 print(f"  imported {sha[:12]}")
@@ -908,7 +951,9 @@ def main() -> None:
                         help="kernel to use (see 'sg kernels' for available)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init", help="initialize genome from seed genes")
+    init_parser = subparsers.add_parser("init", help="initialize genome from seed genes")
+    init_parser.add_argument("--seed-from-pool", default=None,
+                             help="after file seeding, pull alleles for unseeded loci from this pool")
 
     run_parser = subparsers.add_parser("run", help="execute a pathway")
     run_parser.add_argument("pathway", help="pathway name")
@@ -988,8 +1033,17 @@ def main() -> None:
     pool_pull = pool_sub.add_parser("pull", help="pull alleles from a pool")
     pool_pull.add_argument("locus", help="locus to pull")
     pool_pull.add_argument("--pool", required=True, help="pool name")
+    pool_pull.add_argument("--cross-domain", action="store_true",
+                           help="enable cross-domain matching using contract metadata")
     pool_auto = pool_sub.add_parser("auto", help="automatic push/pull cycle")
     pool_auto.add_argument("--pool", required=True, help="pool name")
+    pool_serve = pool_sub.add_parser("serve", help="start a pool server")
+    pool_serve.add_argument("--port", type=int, default=9420, help="port (default: 9420)")
+    pool_serve.add_argument("--host", default="127.0.0.1", help="host (default: 127.0.0.1)")
+    pool_serve.add_argument("--data-dir", default=None, help="data directory (default: .sg/pool)")
+    pool_serve.add_argument("--token", default=None, help="bearer token for authentication")
+    pool_serve.add_argument("--reciprocity", type=int, default=1,
+                            help="min pushes before pulls allowed (0 disables, default: 1)")
 
     subparsers.add_parser("kernels", help="list available kernels")
 

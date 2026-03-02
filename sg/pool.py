@@ -175,8 +175,12 @@ class PoolClient:
         registry: Registry,
         phenotype: PhenotypeMap,
         pool_name: str,
+        contract_store: Any = None,
     ) -> bool:
         """Push the dominant allele for a locus to a pool.
+
+        When contract_store is provided, includes domain and contract metadata
+        in the payload for cross-domain matching.
 
         Returns True if push succeeded, False otherwise.
         """
@@ -196,7 +200,7 @@ class PoolClient:
         if source is None:
             return False
 
-        payload = {
+        payload: dict[str, Any] = {
             "locus": locus,
             "sha256": allele.sha256,
             "source": source,
@@ -205,6 +209,17 @@ class PoolClient:
             "successful_invocations": allele.successful_invocations,
             "total_invocations": allele.total_invocations,
         }
+
+        # Include cross-domain metadata when contract store is available
+        if contract_store is not None:
+            try:
+                from sg.contracts import contract_to_pool_metadata
+                meta = contract_to_pool_metadata(contract_store, locus)
+                if meta is not None:
+                    payload["domain"] = meta["domain"]
+                    payload["contract"] = meta
+            except Exception:
+                pass  # gracefully degrade if contract metadata unavailable
 
         if httpx is None:
             raise RuntimeError("httpx required for pool operations: pip install httpx")
@@ -232,8 +247,13 @@ class PoolClient:
         registry: Registry,
         phenotype: PhenotypeMap,
         pool_name: str,
+        cross_domain: bool = False,
+        contract_store: Any = None,
     ) -> list[str]:
         """Pull alleles for a locus from a pool.
+
+        When cross_domain=True and contract_store is provided, sends contract
+        metadata to the server for cross-domain matching.
 
         Returns list of imported allele SHAs.
         Pulled alleles enter as recessive.
@@ -243,9 +263,20 @@ class PoolClient:
         if httpx is None:
             raise RuntimeError("httpx required for pool operations: pip install httpx")
 
+        url = f"{config.url}/pool/pull/{locus}"
+        params: dict[str, str] = {}
+
+        if cross_domain and contract_store is not None:
+            from sg.contracts import contract_to_pool_metadata
+            meta = contract_to_pool_metadata(contract_store, locus)
+            if meta is not None:
+                params["cross_domain"] = "true"
+                params["contract"] = json.dumps(meta)
+
         try:
             resp = httpx.get(
-                f"{config.url}/pool/pull/{locus}",
+                url,
+                params=params,
                 headers=self._headers(config),
                 timeout=30.0,
             )
@@ -315,7 +346,8 @@ class PoolClient:
             if not is_push_eligible(allele):
                 continue
             try:
-                if self.push(locus, registry, phenotype, pool_name):
+                if self.push(locus, registry, phenotype, pool_name,
+                             contract_store=contract_store):
                     pushed += 1
             except Exception as e:
                 push_errors.append(f"{locus}: {e}")
@@ -323,7 +355,8 @@ class PoolClient:
         # Pull for all known loci
         for locus in contract_store.known_loci():
             try:
-                shas = self.pull(locus, registry, phenotype, pool_name)
+                shas = self.pull(locus, registry, phenotype, pool_name,
+                                 contract_store=contract_store)
                 pulled += len(shas)
             except Exception as e:
                 pull_errors.append(f"{locus}: {e}")

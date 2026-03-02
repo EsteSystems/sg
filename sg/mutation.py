@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +27,10 @@ class MutationContext:
     locus: str
     failing_input: str
     error_message: str
+    kernel_state: str | None = None
+    prior_mutations: list[str] = field(default_factory=list)
+    pathway_context: str | None = None
+    sibling_summaries: list[str] = field(default_factory=list)
 
 
 class MutationEngine(ABC):
@@ -34,6 +38,20 @@ class MutationEngine(ABC):
     def mutate(self, ctx: MutationContext) -> str:
         """Generate a mutated gene source. Returns Python source code."""
         ...
+
+    def mutate_batch(self, ctx: MutationContext, count: int = 3) -> list[str]:
+        """Generate multiple diverse mutations.
+
+        Default implementation calls mutate() N times, tolerating individual
+        failures. Subclasses may override for single-call batch generation.
+        """
+        results = []
+        for _ in range(count):
+            try:
+                results.append(self.mutate(ctx))
+            except Exception:
+                continue
+        return results
 
     def generate(self, locus: str, contract_prompt: str,
                  count: int = 1) -> list[str]:
@@ -65,6 +83,10 @@ class MockMutationEngine(MutationEngine):
         if not fixture_path.exists():
             raise FileNotFoundError(f"no fixture at {fixture_path}")
         return fixture_path.read_text()
+
+    def mutate_batch(self, ctx: MutationContext, count: int = 3) -> list[str]:
+        """Mock returns the single fixture as a 1-element list."""
+        return [self.mutate(ctx)]
 
     def generate(self, locus: str, contract_prompt: str,
                  count: int = 1) -> list[str]:
@@ -170,6 +192,27 @@ class LLMMutationEngine(MutationEngine):
         except ValueError:
             return f"Locus: {locus}"
 
+    def _enriched_context_sections(self, ctx: MutationContext) -> str:
+        """Build optional prompt sections from enriched MutationContext fields."""
+        sections = []
+        if ctx.kernel_state:
+            sections.append(f"## Current kernel state:\n{ctx.kernel_state}")
+        if ctx.prior_mutations:
+            summaries = "\n".join(f"  - {s}" for s in ctx.prior_mutations)
+            sections.append(
+                f"## Prior mutation attempts (failed):\n{summaries}\n"
+                "Avoid repeating these approaches."
+            )
+        if ctx.pathway_context:
+            sections.append(f"## Pathway context:\n{ctx.pathway_context}")
+        if ctx.sibling_summaries:
+            siblings = "\n".join(f"  - {s}" for s in ctx.sibling_summaries)
+            sections.append(
+                f"## Other alleles for this locus:\n{siblings}\n"
+                "Try a different approach from these existing implementations."
+            )
+        return "\n\n".join(sections)
+
     def mutate(self, ctx: MutationContext) -> str:
         contract_ctx = self._contract_prompt(ctx.locus)
 
@@ -187,6 +230,8 @@ class LLMMutationEngine(MutationEngine):
                 return cached
 
         system_ctx = self._system_context()
+        enriched = self._enriched_context_sections(ctx)
+        enriched_block = f"\n\n{enriched}" if enriched else ""
         prompt = f"""You are a gene mutation engine for the Software Genomics runtime.
 
 {system_ctx}
@@ -202,6 +247,7 @@ class LLMMutationEngine(MutationEngine):
 ## Failure context:
 Input: {ctx.failing_input}
 Error: {ctx.error_message}
+{enriched_block}
 
 ## Task
 Write a fixed version of this gene. The gene must:
@@ -219,6 +265,50 @@ Return ONLY the Python source code in a ```python``` block."""
             self._cache.put(key, source)
 
         return source
+
+    def mutate_batch(self, ctx: MutationContext, count: int = 3) -> list[str]:
+        """Generate multiple diverse mutations in a single LLM call."""
+        contract_ctx = self._contract_prompt(ctx.locus)
+        system_ctx = self._system_context()
+        enriched = self._enriched_context_sections(ctx)
+        enriched_block = f"\n\n{enriched}" if enriched else ""
+        prompt = f"""You are a gene mutation engine for the Software Genomics runtime.
+
+{system_ctx}
+
+## Contract
+{contract_ctx}
+
+## Current gene source (failing):
+```python
+{ctx.gene_source}
+```
+
+## Failure context:
+Input: {ctx.failing_input}
+Error: {ctx.error_message}
+{enriched_block}
+
+## Task
+Write {count} DIFFERENT fixed versions of this gene, each using a FUNDAMENTALLY
+DIFFERENT strategy to handle the error case. Each version must:
+1. Define an `execute(input_json: str) -> str` function
+2. Use `gene_sdk` for all domain operations (see available operations above)
+3. Return valid JSON with at least a "success" boolean field
+4. Handle the error case described above
+
+Separate each implementation with a line containing only: ---VARIANT---
+
+Return ONLY Python source code in ```python``` blocks, separated by ---VARIANT---."""
+        text = self._call_api(prompt)
+
+        variants = []
+        for chunk in re.split(r"---VARIANT---", text):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            variants.append(self._extract_python(chunk))
+        return variants if variants else [self._extract_python(text)]
 
     def generate(self, locus: str, contract_prompt: str,
                  count: int = 1) -> list[str]:

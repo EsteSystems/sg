@@ -586,7 +586,7 @@ def cmd_kernels(args: argparse.Namespace) -> None:
 def cmd_completions(args: argparse.Namespace) -> None:
     """Print shell completion script."""
     subcommands = ("init run deploy generate watch status lineage compete "
-                   "dashboard evolve share pull test diff snapshot rollback snapshots pool recover new-plugin kernels completions")
+                   "dashboard evolve share pull test probe diff snapshot rollback snapshots pool recover new-plugin kernels completions")
     engines = "auto mock claude openai deepseek"
     try:
         kernels = " ".join(list_kernel_names())
@@ -773,6 +773,52 @@ def cmd_test(args: argparse.Namespace) -> None:
                 print(f"    [{marker}] {check.name}{msg}")
 
     print(f"\n{passed} passed, {failed} failed, {len(results)} total")
+
+
+def cmd_probe(args: argparse.Namespace) -> None:
+    """Probe a locus with edge-case inputs to discover hidden failures."""
+    from sg.probe import probe_locus
+
+    root = get_project_root()
+    contract_store = load_contract_store(root)
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+    kernel = make_kernel(args)
+    mutation_engine = make_mutation_engine(args, root, contract_store, kernel)
+    fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
+
+    orch = Orchestrator(
+        registry=registry,
+        phenotype=phenotype,
+        mutation_engine=mutation_engine,
+        fusion_tracker=fusion_tracker,
+        kernel=kernel,
+        contract_store=contract_store,
+        project_root=root,
+    )
+
+    locus = getattr(args, "locus", None)
+    count = getattr(args, "count", 10)
+    loci = [locus] if locus else contract_store.known_loci()
+
+    for locus_name in loci:
+        try:
+            report = probe_locus(locus_name, orch, count)
+        except ValueError as e:
+            print(f"  [SKIP] {locus_name}: {e}")
+            continue
+
+        status = "OK" if report.failed == 0 else "FAILURES"
+        print(f"  [{status}] {locus_name} ({report.sha}): "
+              f"{report.passed}/{report.total} passed")
+
+        if report.failed > 0:
+            for r in report.results:
+                if not r.success:
+                    input_short = (r.input_json[:80] + "..."
+                                   if len(r.input_json) > 80 else r.input_json)
+                    print(f"    FAIL: {input_short}")
+                    print(f"          {r.error}")
 
 
 def cmd_diff(args: argparse.Namespace) -> None:
@@ -1065,6 +1111,11 @@ def main() -> None:
     test_parser.add_argument("locus", nargs="?", help="specific locus to test")
     test_parser.add_argument("--verbose", "-v", action="store_true", help="show all check details")
 
+    probe_parser = subparsers.add_parser("probe", help="explore input-space edge cases")
+    probe_parser.add_argument("locus", nargs="?", help="locus to probe (all if omitted)")
+    probe_parser.add_argument("--count", type=int, default=10,
+                              help="number of probes per locus (default: 10)")
+
     diff_parser = subparsers.add_parser("diff", help="compare genome states")
     diff_parser.add_argument("--snapshot", help="compare current to this snapshot")
     diff_parser.add_argument("--a", help="first snapshot (with --b)")
@@ -1149,6 +1200,8 @@ def main() -> None:
         cmd_pull(args)
     elif args.command == "test":
         cmd_test(args)
+    elif args.command == "probe":
+        cmd_probe(args)
     elif args.command == "diff":
         cmd_diff(args)
     elif args.command == "snapshot":

@@ -5,6 +5,7 @@ execute → validate → score → fallback → mutate → register → retry
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from sg import arena
@@ -54,6 +55,7 @@ class Orchestrator:
         self._regression_path = project_root / ".sg" / "regression.json"
         self.regression_detector = RegressionDetector.open(self._regression_path)
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
+        self._current_pathway_context: str | None = None
 
     def _audit(self, event: str, locus: str = "", sha: str = "",
                 **details) -> None:
@@ -144,6 +146,53 @@ class Orchestrator:
 
         return None
 
+    def _build_kernel_state(self) -> str | None:
+        """Serialize tracked kernel resources for mutation context."""
+        resources = self.kernel.tracked_resources()
+        if not resources:
+            return None
+        lines = [f"  {rtype}: {name}" for rtype, name in resources]
+        return "Tracked resources:\n" + "\n".join(lines)
+
+    def _build_prior_mutations(self, locus: str) -> list[str]:
+        """Summarize recent alleles at a locus for mutation context."""
+        alleles = self.registry.alleles_for_locus(locus)
+        summaries = []
+        for allele in alleles[:3]:
+            source = self.registry.load_source(allele.sha256)
+            first_line = ""
+            if source:
+                for line in source.splitlines():
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#"):
+                        first_line = stripped[:80]
+                        break
+            fitness = arena.compute_fitness(allele)
+            summaries.append(
+                f"gen{allele.generation} ({allele.sha256[:8]}): "
+                f"fitness={fitness:.2f}, "
+                f"failures={allele.consecutive_failures}, "
+                f"approach: {first_line}"
+            )
+        return summaries
+
+    def _build_sibling_summaries(
+        self, locus: str, exclude_sha: str | None = None,
+    ) -> list[str]:
+        """Brief descriptions of other alleles at a locus."""
+        alleles = self.registry.alleles_for_locus(locus)
+        summaries = []
+        for allele in alleles[:5]:
+            if allele.sha256 == exclude_sha:
+                continue
+            fitness = arena.compute_fitness(allele)
+            summaries.append(
+                f"{allele.sha256[:8]}: state={allele.state}, "
+                f"fitness={fitness:.2f}, "
+                f"invocations={allele.total_invocations}"
+            )
+        return summaries
+
     def _try_mutation(
         self, locus: str, input_json: str, error: str
     ) -> tuple[str, str] | None:
@@ -173,19 +222,38 @@ class Orchestrator:
             locus=locus,
             failing_input=input_json,
             error_message=error,
+            kernel_state=self._build_kernel_state(),
+            prior_mutations=self._build_prior_mutations(locus),
+            pathway_context=self._current_pathway_context,
+            sibling_summaries=self._build_sibling_summaries(
+                locus, exclude_sha=dominant_sha),
         )
 
         risk = self._get_risk(locus)
         use_txn = requires_transaction(risk)
 
-        for attempt in range(MAX_MUTATION_RETRIES):
-            try:
-                new_source = self.mutation_engine.mutate(ctx)
-            except Exception as e:
-                logger.warning("mutation generation failed (attempt %d): %s",
-                               attempt + 1, e, extra={"locus": locus})
-                continue
+        # Generate batch of diverse candidates
+        candidates: list[str] = []
+        try:
+            candidates = self.mutation_engine.mutate_batch(
+                ctx, count=MAX_MUTATION_RETRIES)
+        except Exception as e:
+            logger.warning("batch mutation generation failed: %s", e,
+                           extra={"locus": locus})
 
+        # Fallback: sequential single mutations if batch returned empty
+        if not candidates:
+            for attempt in range(MAX_MUTATION_RETRIES):
+                try:
+                    candidates.append(self.mutation_engine.mutate(ctx))
+                except Exception as e:
+                    logger.warning("mutation generation failed (attempt %d): %s",
+                                   attempt + 1, e, extra={"locus": locus})
+
+        # Test all candidates, collect passing ones
+        first_passing: tuple[str, str] | None = None
+
+        for i, new_source in enumerate(candidates):
             parent_sha = dominant_sha
             gen = 0
             if parent_sha:
@@ -211,12 +279,12 @@ class Orchestrator:
                 allele = self.registry.get(new_sha)
                 if allele:
                     arena.record_success(allele)
-                logger.info("mutant %s succeeded (attempt %d)",
-                            new_sha[:12], attempt + 1,
+                logger.info("mutant %s passed (candidate %d/%d)",
+                            new_sha[:12], i + 1, len(candidates),
                             extra={"locus": locus, "sha": new_sha[:12]})
-                self._audit("mutation_success", locus=locus, sha=new_sha,
-                            attempt=attempt + 1)
-                return (result, new_sha)
+
+                if first_passing is None:
+                    first_passing = (result, new_sha)
 
             except Exception as e:
                 if txn and txn.action_count > 0:
@@ -227,14 +295,19 @@ class Orchestrator:
                 allele = self.registry.get(new_sha)
                 if allele:
                     arena.record_failure(allele)
-                logger.warning("mutant %s failed: %s (attempt %d)",
-                               new_sha[:12], e, attempt + 1,
+                logger.warning("mutant %s failed: %s (candidate %d/%d)",
+                               new_sha[:12], e, i + 1, len(candidates),
                                extra={"locus": locus, "sha": new_sha[:12]})
-                continue
 
-        logger.warning("all %d mutation attempts failed for %s",
-                       MAX_MUTATION_RETRIES, locus, extra={"locus": locus})
-        return None
+        if first_passing is None:
+            logger.warning("all %d mutation candidates failed for %s",
+                           len(candidates), locus, extra={"locus": locus})
+            return None
+
+        result, sha = first_passing
+        self._audit("mutation_success", locus=locus, sha=sha,
+                    candidates_tested=len(candidates))
+        return first_passing
 
     def _check_promotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)
@@ -242,6 +315,20 @@ class Orchestrator:
         dominant = self.registry.get(dominant_sha) if dominant_sha else None
 
         if allele and arena.should_promote(allele, dominant):
+            # Test cross-locus interactions before promoting
+            interaction_failures = self._test_promotion_interactions(locus, sha)
+            if interaction_failures:
+                policy = os.environ.get("SG_INTERACTION_POLICY", "rollback")
+                if policy == "rollback":
+                    logger.warning(
+                        "promotion blocked for %s: %d interaction failure(s)",
+                        sha[:12], len(interaction_failures),
+                        extra={"locus": locus, "sha": sha[:12]})
+                    self._audit("promotion_blocked", locus=locus, sha=sha,
+                                failures=[f.pathway_name
+                                          for f in interaction_failures])
+                    return
+
             arena.set_dominant(allele)
             if dominant:
                 arena.set_recessive(dominant)
@@ -250,6 +337,16 @@ class Orchestrator:
                         extra={"locus": locus, "sha": sha[:12], "event": "promotion"})
             self._audit("promotion", locus=locus, sha=sha,
                         fitness=arena.compute_fitness(allele))
+
+    def _test_promotion_interactions(self, locus: str, sha: str) -> list:
+        """Test an allele against cross-locus pathways before promotion."""
+        try:
+            from sg.interactions import check_interactions
+            return check_interactions(locus, sha, self)
+        except Exception as e:
+            logger.warning("interaction testing failed: %s", e,
+                           extra={"locus": locus})
+            return []
 
     def _process_diagnostic_feedback(self, locus: str, output_json: str) -> None:
         """If this locus is a diagnostic gene with feeds, feed results back."""

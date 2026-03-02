@@ -162,7 +162,22 @@ def _execute_locus_step(
 ) -> tuple[str, str]:
     """Execute a single locus step. Returns (output, sha)."""
     step_input = step.input_transform(input_json, outputs)
-    result = orchestrator.execute_locus(step.locus, step_input)
+
+    # Set pathway context on orchestrator for richer mutation context
+    if hasattr(orchestrator, '_current_pathway_context'):
+        step_index = len(outputs) + 1
+        prev_summary = ""
+        if outputs:
+            prev_summary = f", after prior step produced {outputs[-1][:100]}"
+        orchestrator._current_pathway_context = (
+            f"step {step_index} of '{pathway_name}'{prev_summary}"
+        )
+
+    try:
+        result = orchestrator.execute_locus(step.locus, step_input)
+    finally:
+        if hasattr(orchestrator, '_current_pathway_context'):
+            orchestrator._current_pathway_context = None
 
     if result is None:
         fusion_tracker.record_failure(pathway_name)

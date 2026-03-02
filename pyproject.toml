@@ -21,6 +21,13 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 sg = "sg.cli:main"
 
+[project.entry-points."sg.kernels"]
+stub = "sg.kernel.stub:StubKernel"
+mock = "sg.kernel.mock:MockNetworkKernel"
+network-mock = "sg.kernel.mock:MockNetworkKernel"
+production = "sg.kernel.production:ProductionNetworkKernel"
+network-production = "sg.kernel.production:ProductionNetworkKernel"
+
 [project.urls]
 Repository = "https://github.com/EsteSystems/sg"
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from sg import __version__, arena
 from sg.contracts import ContractStore, validate_output
 from sg.fusion import FusionTracker
-from sg.kernel.mock import MockNetworkKernel
+from sg.kernel.discovery import load_kernel, list_kernel_names, KernelNotFoundError, KernelLoadError
 from sg.mutation import MockMutationEngine, MutationEngine
 from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap
@@ -85,12 +85,16 @@ def make_mutation_engine(
 
 
 def make_kernel(args: argparse.Namespace):
-    """Create the appropriate kernel based on --kernel flag."""
-    kernel_type = getattr(args, "kernel", "mock")
-    if kernel_type == "production":
-        from sg.kernel.production import ProductionNetworkKernel
-        return ProductionNetworkKernel()
-    return MockNetworkKernel()
+    """Create the appropriate kernel based on --kernel flag.
+
+    Uses entry-point discovery to find and instantiate the kernel.
+    """
+    kernel_name = getattr(args, "kernel", "mock")
+    try:
+        return load_kernel(kernel_name)
+    except (KernelNotFoundError, KernelLoadError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
@@ -423,7 +427,7 @@ def cmd_compete(args: argparse.Namespace) -> None:
     contract_store = load_contract_store(root)
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
-    kernel = MockNetworkKernel()
+    kernel = make_kernel(args)
 
     locus = args.locus
     input_json = args.input
@@ -457,7 +461,7 @@ def cmd_compete(args: argparse.Namespace) -> None:
         successes = 0
         failures = 0
         for _ in range(rounds):
-            trial_kernel = MockNetworkKernel()
+            trial_kernel = kernel.create_shadow()
             try:
                 from sg.loader import load_gene, call_gene
                 execute_fn = load_gene(source, trial_kernel)
@@ -510,12 +514,40 @@ def cmd_compete(args: argparse.Namespace) -> None:
     print()
 
 
+def cmd_kernels(args: argparse.Namespace) -> None:
+    """List available kernel plugins."""
+    from sg.kernel.discovery import discover_kernels
+
+    kernels = discover_kernels()
+    if not kernels:
+        print("No kernels registered.")
+        return
+
+    print("Available kernels:\n")
+    for name in sorted(kernels.keys()):
+        ep = kernels[name]
+        try:
+            cls = ep.load()
+            instance = cls()
+            domain = instance.domain_name()
+            ops = len(instance.describe_operations())
+            print(f"  {name:<25} {ep.value}")
+            print(f"    domain: {domain}, operations: {ops}")
+        except Exception as e:
+            print(f"  {name:<25} {ep.value}")
+            print(f"    (load error: {e})")
+    print()
+
+
 def cmd_completions(args: argparse.Namespace) -> None:
     """Print shell completion script."""
     subcommands = ("init run deploy generate watch status lineage compete "
-                   "dashboard evolve share pull test diff snapshot rollback snapshots completions")
+                   "dashboard evolve share pull test diff snapshot rollback snapshots kernels completions")
     engines = "auto mock claude openai deepseek"
-    kernels = "mock production"
+    try:
+        kernels = " ".join(list_kernel_names())
+    except Exception:
+        kernels = "stub mock production"
 
     if args.shell == "bash":
         print(f'''_sg_completions() {{
@@ -669,7 +701,7 @@ def cmd_test(args: argparse.Namespace) -> None:
     contract_store = load_contract_store(root)
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
-    kernel = MockNetworkKernel()
+    kernel = make_kernel(args)
 
     suite = ConformanceSuite()
     locus = getattr(args, "locus", None)
@@ -787,8 +819,8 @@ def main() -> None:
                         help="mutation engine to use (auto|mock|claude|openai|deepseek)")
     parser.add_argument("--model", default=None,
                         help="override default model for the mutation engine")
-    parser.add_argument("--kernel", default="mock", choices=["mock", "production"],
-                        help="kernel to use (mock|production)")
+    parser.add_argument("--kernel", default="mock",
+                        help="kernel to use (see 'sg kernels' for available)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="initialize genome from seed genes")
@@ -861,6 +893,8 @@ def main() -> None:
 
     subparsers.add_parser("snapshots", help="list all genome snapshots")
 
+    subparsers.add_parser("kernels", help="list available kernels")
+
     comp_parser = subparsers.add_parser("completions", help="generate shell completions")
     comp_parser.add_argument("shell", choices=["bash", "zsh", "fish"],
                              help="shell type")
@@ -903,5 +937,7 @@ def main() -> None:
         cmd_rollback(args)
     elif args.command == "snapshots":
         cmd_snapshots(args)
+    elif args.command == "kernels":
+        cmd_kernels(args)
     elif args.command == "completions":
         cmd_completions(args)

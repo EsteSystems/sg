@@ -30,13 +30,8 @@ class KernelLoadError(Exception):
 
 
 def _get_entry_points(group: str):
-    """Get entry points for a group, Python 3.9+ compatible."""
-    eps = importlib.metadata.entry_points()
-    if hasattr(eps, "select"):
-        # Python 3.10+
-        return eps.select(group=group)
-    # Python 3.9: returns dict[str, list[EntryPoint]]
-    return eps.get(group, [])
+    """Get entry points for a group."""
+    return importlib.metadata.entry_points(group=group)
 
 
 def discover_kernels() -> Dict[str, importlib.metadata.EntryPoint]:

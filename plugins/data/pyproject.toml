@@ -2,7 +2,7 @@
 name = "sg-data"
 version = "0.2.0"
 description = "Software Genomics — data pipeline domain plugin"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "BSD-2-Clause"}
 dependencies = [
     "software-genomics>=0.2.0",

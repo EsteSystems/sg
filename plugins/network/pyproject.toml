@@ -2,7 +2,7 @@
 name = "sg-network"
 version = "0.2.0"
 description = "Software Genomics — network domain plugin"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "BSD-2-Clause"}
 dependencies = [
     "software-genomics>=0.2.0",

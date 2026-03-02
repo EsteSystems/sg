@@ -10,7 +10,7 @@ For the paradigm whitepaper and design philosophy, see [SOFTWARE-GENOMICS.md](SO
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - pip
 - Linux for production kernel operations (macOS for development with mock kernel)
 

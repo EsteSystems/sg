@@ -257,7 +257,7 @@ verify:
 
 - Each line names a diagnostic locus and binds parameters using `{reference}` substitution
 - The `within` clause sets the convergence window — how long to wait before running the checks
-- Verification results feed back into the gene's temporal fitness
+- Verification results feed back into the gene's temporal fitness: a passing check at `t+30s` contributes convergence fitness (50% of the total score), while a failing check retroactively decays the gene's fitness even though the immediate execution succeeded
 
 ---
 

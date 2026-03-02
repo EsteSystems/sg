@@ -534,6 +534,89 @@ If the fused gene fails, it **decomposes** back to the original multi-step pathw
 4. Fused gene registered and used for subsequent executions
 5. Fused gene fails → decompose back to multi-step
 
+### Pathway Evolution
+
+Pathway structure is evolvable. Just as gene alleles compete at each locus, **pathway alleles** compete at each pathway — different step orderings, step sets, or step substitutions can coexist and be selected by fitness.
+
+Each pathway allele is identified by a **structure SHA** — a hash of the step sequence (step types, targets, loop variables, conditional branches). Pathway alleles have their own state machine (recessive → dominant → deprecated), fitness tracking, and lineage.
+
+**When does structural mutation fire?** When a pathway has low fitness but its constituent genes have high individual fitness, the problem is structural — the steps are composed incorrectly. The orchestrator applies one of four mutation operators:
+
+| Operator | What it does | When it fires |
+|----------|-------------|---------------|
+| **Reorder** | Swaps step order | Timing anomalies suggest a different order would be faster |
+| **Delete** | Removes a step | A step contributes no fitness or has disproportionate failures |
+| **Substitute** | Replaces a step's locus | A compatible alternative locus exists with higher fitness |
+| **Insert** | Adds a new step | Per-step failure analysis suggests a missing preparation step (LLM-assisted) |
+
+**Promotion**: A pathway allele is promoted when it has 200+ executions and a fitness advantage of at least +0.15 over the current dominant.
+
+**Demotion**: 5 consecutive failures demote a pathway allele to deprecated.
+
+**Throttle**: Pathway mutation is rate-limited. The default cooldown is 4 hours, configurable via `SG_PATHWAY_MUTATION_COOLDOWN` (in hours). This prevents runaway structural mutation during transient failures.
+
+### Automatic Decomposition
+
+When a gene fails for **qualitatively different reasons** — not the same error repeated, but diverse failures suggesting the gene is doing too much — the system signals that it should be decomposed into a pathway of smaller, focused sub-genes.
+
+**Trigger**: 10+ errors with 3+ distinct error patterns (after normalization: numbers, paths, and quoted strings are stripped before clustering).
+
+**What happens**:
+1. The decomposition detector clusters errors by normalized message pattern
+2. The mutation engine receives the clusters and generates: a new pathway contract, sub-gene contracts, and seed sources for each sub-gene
+3. Sub-genes are registered and the pathway is activated
+4. Each sub-gene evolves independently at its own locus
+5. If the decomposed pathway reinforces (10 consecutive successes), it can re-fuse
+
+Decomposition state is visible in `sg status` output.
+
+### Interaction Detection
+
+Before promoting an allele, the orchestrator checks for **cross-locus regressions**. It identifies all pathways that include the allele's locus, generates synthetic inputs from each pathway's contract, temporarily promotes the candidate allele, and runs each affected pathway.
+
+If any pathway fails:
+- **Rollback policy** (default): promotion is blocked, the original dominant is restored
+- **Mutate policy**: promotion proceeds, but the broken pathways are logged for investigation
+
+Configure with `SG_INTERACTION_POLICY=rollback|mutate`.
+
+### Input Probing
+
+Discover hidden failure modes before they hit production:
+
+```bash
+sg probe bridge_create              # probe with 10 edge-case inputs
+sg probe bridge_create --count 20   # probe with 20 inputs
+sg probe                            # probe all loci
+```
+
+The probe generates synthetic inputs from the contract's `takes` schema using these strategies: valid baseline, empty strings, zero/negative integers, empty arrays, missing optional fields, boolean inversions, long strings (1000 chars), extra unknown fields, and empty object.
+
+Probing does **not** trigger mutation — it's purely diagnostic. Use it for pre-deployment validation or to identify which edge cases a gene doesn't handle.
+
+### Pathway Fitness
+
+The pathway fitness tracker records per-pathway execution metrics beyond simple success/failure:
+
+- **Success rate**: windowed to the last 100 executions, with recency bias
+- **Per-step timing**: execution time for each step (windowed to last 50 entries)
+- **Failure distribution**: which steps fail most often, as a percentage
+- **Timing anomalies**: steps whose latest execution time exceeds 2x their moving average
+- **Input clusters**: groups of failing inputs by which step they fail at
+
+All of this is visible in `sg status` output and available through the dashboard API. Timing anomalies and failure hotspots are the signals that drive pathway mutation — they tell the system *where* in the pathway the structural problem lies.
+
+### Pathway Lineage
+
+View the evolutionary history of pathway alleles:
+
+```bash
+sg lineage --pathway                             # list all pathways with alleles
+sg lineage --pathway configure_bridge_with_stp   # show ancestry tree
+```
+
+The ancestry tree shows each pathway allele with its structure SHA, fitness score, execution counts, state, and (if it was created by mutation) the operator that produced it. Below each allele, the normalized step sequence is displayed.
+
 ---
 
 ## 7. Topologies
@@ -731,7 +814,9 @@ Peer fitness is only factored in when the peer has at least 10 total invocations
 | `sg watch <pathway> --input '{...}' [--interval N] [--count N]` | Periodically run diagnostics |
 | `sg compete <locus> --input '{...}' [--rounds N]` | Run allele competition trials |
 | `sg status` | Show genome state |
-| `sg lineage <locus>` | Show mutation ancestry tree |
+| `sg lineage <locus>` | Show gene mutation ancestry tree |
+| `sg lineage --pathway [name]` | Show pathway allele ancestry tree |
+| `sg probe [locus] [--count N]` | Probe loci with edge-case inputs |
 | `sg test [locus] [-v]` | Run contract conformance tests |
 | `sg evolve --family <fam> --context '...'` | Generate a new contract via LLM |
 | `sg dashboard [--port 8420] [--host 0.0.0.0]` | Start web dashboard |
@@ -771,6 +856,8 @@ Peer fitness is only factored in when the peer has at least 10 total invocations
 | `OPENAI_API_KEY` | OpenAI API key for mutations |
 | `DEEPSEEK_API_KEY` | DeepSeek API key for mutations |
 | `SG_PROTECTED_INTERFACES` | Comma-separated extra protected interfaces |
+| `SG_INTERACTION_POLICY` | Promotion interaction policy: `rollback` (default) or `mutate` |
+| `SG_PATHWAY_MUTATION_COOLDOWN` | Minimum hours between pathway mutations per pathway (default: 4) |
 
 ### Kernel Selection
 

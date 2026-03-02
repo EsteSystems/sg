@@ -318,6 +318,8 @@ New constructs:
 - **`requires`**: Dependency declarations. Steps 1 and 2 have no dependency — they run in parallel. Step 3 needs step 2 (VLANs go on the bond). The orchestrator infers parallelism from the dependency graph.
 - **`report partial`**: The pathway can partially succeed. A server with management but no storage is better than a server with nothing.
 
+Pathway structure is itself evolvable. When a pathway repeatedly fails despite its constituent genes being individually fit, the system applies structural mutation operators — reordering steps, removing redundant ones, substituting compatible alternatives, or inserting new steps. The pathway becomes an entity with its own allele stack, promotion criteria, and lineage, subject to the same selection pressure as individual genes.
+
 ### Level 3: Topology (Declarative Intent)
 
 The domain expert doesn't specify steps. They describe the desired end state:
@@ -600,9 +602,9 @@ The key difference: JIT compilation preserves exact semantics. Pathway fusion pr
 
 ### Bidirectional Architectural Evolution
 
-The inverse of fusion is also possible. A gene that repeatedly fails on diverse inputs might be too coarse — fixing one edge case breaks another. This is the signal that the gene is doing too much. A decomposition engine could break it into a pathway of smaller genes, each handling a narrower concern, each independently evolvable.
+The inverse of fusion is implemented. When a gene fails on diverse inputs — 10+ errors across 3+ qualitatively different failure patterns — the decomposition detector signals that the gene is doing too much. The mutation engine decomposes it into a pathway of focused sub-genes, each handling a narrower concern, each independently evolvable. The decomposed pathway can then reinforce (10 consecutive successes with stable composition) and re-fuse, completing the architectural cycle.
 
-Together, fusion and decomposition give the system bidirectional architectural evolution: consolidate when stable, decompose when stressed, and find the natural grain of the problem through empirical pressure rather than upfront design.
+Together, fusion and decomposition give the system bidirectional architectural evolution: consolidate when stable, decompose when stressed, and find the natural grain of the problem through empirical pressure rather than upfront design. See the [Handbook](HANDBOOK.md) for operational details on decomposition triggers and configuration.
 
 
 ## 9. Safety and Trust
@@ -678,6 +680,10 @@ Shadow mode uses the mock kernel with production topology replicated in memory. 
 The clock speed of evolution depends on the blast radius of getting it wrong. Low-risk diagnostic genes evolve freely — mutations compete live with minimal oversight. High-risk configuration genes evolve under supervision — shadow mode, canary, convergence checks. Critical infrastructure genes evolve slowly — every stage must pass, and promotion requires resilience fitness (hours or days of stable operation).
 
 This is supervised evolution with variable clock speed. The system proposes mutations constantly. How fast those mutations reach production depends on the consequences.
+
+### Interaction Detection
+
+Before an allele is promoted to dominant, the orchestrator tests it against every pathway that includes its locus. Synthetic inputs are generated from each pathway's contract, the candidate allele is temporarily promoted, and the affected pathways execute. If any pathway breaks, the promotion is blocked and the original dominant is restored. This ensures that local optimization — a better gene at one locus — does not cause global regression — a broken pathway that depends on the old behavior.
 
 
 ## 10. The Network Genome — A Case Study

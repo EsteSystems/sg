@@ -136,12 +136,8 @@ class NetworkKernel(Kernel):
 
     def resource_mappers(self) -> dict:
         """Return network topology resource type -> mapper mappings."""
-        from sg.topology import _map_bridge, _map_bond, _map_vlan_bridges
-        return {
-            "bridge": _map_bridge,
-            "bond": _map_bond,
-            "vlan_bridges": _map_vlan_bridges,
-        }
+        from sg.kernel.network_mappers import NETWORK_RESOURCE_MAPPERS
+        return NETWORK_RESOURCE_MAPPERS
 
     def delete_resource(self, resource_type: str, name: str) -> None:
         """Delete a network resource by type."""

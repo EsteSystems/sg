@@ -85,9 +85,18 @@ class Parser:
 
     # --- Gene contract ---
 
+    def _parse_domain_clause(self) -> str | None:
+        """Parse optional 'for <domain>' clause after contract name."""
+        if (self.peek().type == TokenType.KEYWORD
+                and self.peek().value == "for"):
+            self.advance()  # consume "for"
+            return self.expect(TokenType.IDENTIFIER).value
+        return None
+
     def parse_gene(self) -> GeneContract:
         self.expect(TokenType.KEYWORD, "gene")
         name = self.expect(TokenType.IDENTIFIER).value
+        domain = self._parse_domain_clause()
         self.skip_newlines()
 
         family: GeneFamily | None = None
@@ -180,6 +189,7 @@ class Parser:
             family=family,
             risk=risk,
             does=does,
+            domain=domain,
             takes=takes,
             gives=gives,
             types=types,
@@ -197,6 +207,7 @@ class Parser:
     def parse_pathway(self) -> PathwayContract:
         self.expect(TokenType.KEYWORD, "pathway")
         name = self.expect(TokenType.IDENTIFIER).value
+        domain = self._parse_domain_clause()
         self.skip_newlines()
 
         risk: BlastRadius = BlastRadius.NONE
@@ -260,6 +271,7 @@ class Parser:
             name=name,
             risk=risk,
             does=does,
+            domain=domain,
             takes=takes,
             steps=steps,
             requires=requires,
@@ -273,6 +285,7 @@ class Parser:
     def parse_topology(self) -> TopologyContract:
         self.expect(TokenType.KEYWORD, "topology")
         name = self.expect(TokenType.IDENTIFIER).value
+        domain = self._parse_domain_clause()
         self.skip_newlines()
 
         does = ""
@@ -323,6 +336,7 @@ class Parser:
         return TopologyContract(
             name=name,
             does=does,
+            domain=domain,
             takes=takes,
             has=has,
             verify=verify,

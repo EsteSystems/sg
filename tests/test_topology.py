@@ -13,6 +13,7 @@ from sg.parser.parser import parse_sg
 from sg.parser.types import TopologyContract, TopologyResource
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
+from sg.kernel.network_mappers import NETWORK_RESOURCE_MAPPERS
 from sg.topology import (
     TopologyStep, decompose, execute_topology,
     _build_dependency_graph, _topological_sort,
@@ -42,7 +43,7 @@ class TestDecompose:
             "bridge_name": "br0",
             "bridge_ifaces": ["eth0"],
             "uplink": "eth1",
-        }))
+        }), NETWORK_RESOURCE_MAPPERS)
         assert len(steps) == 1
         assert steps[0].action == "pathway"
         assert steps[0].target == "provision_management_bridge"
@@ -66,7 +67,7 @@ class TestDecompose:
         steps = decompose(topo, json.dumps({
             "bridge_name": "br0",
             "bridge_ifaces": ["eth0"],
-        }))
+        }), NETWORK_RESOURCE_MAPPERS)
         assert len(steps) == 1
         assert steps[0].action == "pathway"
         assert steps[0].target == "configure_bridge_with_stp"
@@ -85,7 +86,7 @@ class TestDecompose:
         steps = decompose(topo, json.dumps({
             "bridge_name": "br0",
             "bridge_ifaces": ["eth0"],
-        }))
+        }), NETWORK_RESOURCE_MAPPERS)
         assert len(steps) == 1
         assert steps[0].action == "gene"
         assert steps[0].target == "bridge_create"
@@ -105,7 +106,7 @@ class TestDecompose:
             "bond_name": "bond0",
             "bond_mode": "active-backup",
             "bond_members": ["eth2", "eth3"],
-        }))
+        }), NETWORK_RESOURCE_MAPPERS)
         assert len(steps) == 1
         assert steps[0].action == "gene"
         assert steps[0].target == "bond_create"
@@ -128,7 +129,7 @@ class TestDecompose:
         steps = decompose(topo, json.dumps({
             "bond_name": "bond0",
             "vlans": [100, 200, 300],
-        }))
+        }), NETWORK_RESOURCE_MAPPERS)
         assert len(steps) == 1
         assert steps[0].action == "loop_gene"
         assert steps[0].target == "vlan_create"
@@ -150,7 +151,7 @@ class TestDecompose:
             )],
         )
         with pytest.raises(ValueError, match="unknown resource type"):
-            decompose(topo, "{}")
+            decompose(topo, "{}", NETWORK_RESOURCE_MAPPERS)
 
 
 # --- Dependency ordering ---
@@ -213,7 +214,7 @@ class TestDependencyOrdering:
             "bond_mode": "active-backup",
             "bond_members": ["eth2", "eth3"],
             "vlans": [100, 200],
-        }))
+        }), NETWORK_RESOURCE_MAPPERS)
 
         names = [s.resource_name for s in steps]
         # storage before vm_traffic (trunk dependency)
@@ -327,7 +328,7 @@ class TestExecuteTopology:
                 "bridge_ifaces": ["eth0"],
                 "bond_name": "bond0",
                 "bond_members": ["eth2", "eth3"],
-            }), orch)
+            }), orch, NETWORK_RESOURCE_MAPPERS)
 
         # Bridge should still have been created (preserve what works)
         assert orch.kernel.get_bridge("br0") is not None

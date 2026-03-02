@@ -25,6 +25,7 @@ class ContractInfo:
     output_schema: dict
     family: str = ""
     risk: str = "none"
+    domain: str | None = None
     raw: GeneContract | PathwayContract | TopologyContract | None = None
 
 
@@ -67,6 +68,7 @@ def _gene_contract_to_info(contract: GeneContract) -> ContractInfo:
         output_schema=_fields_to_schema(contract.gives),
         family=contract.family.value,
         risk=contract.risk.value,
+        domain=contract.domain,
         raw=contract,
     )
 
@@ -91,10 +93,25 @@ class ContractStore:
         for sg_file in sorted(contracts_dir.rglob("*.sg")):
             self.load_file(sg_file)
 
-    def load_file(self, path: Path) -> None:
-        """Parse a single .sg file and register the contract."""
+    def load_file(self, path: Path, kernel_domain: str | None = None) -> None:
+        """Parse a single .sg file and register the contract.
+
+        Args:
+            kernel_domain: If provided, warn when a contract's domain
+                doesn't match the kernel's domain.
+        """
         source = path.read_text()
         contract = parse_sg(source)
+
+        # Domain validation
+        contract_domain = getattr(contract, "domain", None)
+        if contract_domain and kernel_domain and contract_domain != kernel_domain:
+            import sys
+            print(
+                f"warning: contract '{contract.name}' requires domain "
+                f"'{contract_domain}' (kernel provides '{kernel_domain}')",
+                file=sys.stderr,
+            )
 
         if isinstance(contract, GeneContract):
             self.genes[contract.name] = contract
@@ -216,3 +233,38 @@ def validate_output(
                 return False
 
     return True
+
+
+# --- Contract structural compatibility ---
+
+
+def _fields_compatible(
+    a_fields: list[FieldDef], b_fields: list[FieldDef],
+) -> bool:
+    """Check if two field lists are structurally compatible.
+
+    Compatible means: every required field in `a` has a matching field in `b`
+    with the same name and type.
+    """
+    b_map = {f.name: f for f in b_fields}
+    for f in a_fields:
+        if not f.required or f.optional:
+            continue
+        if f.name not in b_map:
+            return False
+        if f.type != b_map[f.name].type:
+            return False
+    return True
+
+
+def contracts_compatible(a: GeneContract, b: GeneContract) -> bool:
+    """Check if two gene contracts have compatible takes/gives signatures.
+
+    Compatible means: every required field in `a`'s takes/gives has a matching
+    field in `b` with the same name and type. This is directional — `a` is
+    compatible with `b` if `b` can satisfy `a`'s required interface.
+    """
+    return (
+        _fields_compatible(a.takes, b.takes)
+        and _fields_compatible(a.gives, b.gives)
+    )

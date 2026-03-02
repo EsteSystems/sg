@@ -450,3 +450,98 @@ gene broken
         source = "widget broken"
         with pytest.raises(ParseError):
             parse_sg(source)
+
+
+class TestDomainClause:
+    def test_gene_with_domain(self):
+        source = """\
+gene bridge_create for network
+  is configuration
+  risk low
+
+  does:
+    Create a bridge.
+"""
+        contract = parse_sg(source)
+        assert contract.name == "bridge_create"
+        assert contract.domain == "network"
+
+    def test_gene_without_domain(self):
+        source = """\
+gene bridge_create
+  is configuration
+  risk low
+
+  does:
+    Create a bridge.
+"""
+        contract = parse_sg(source)
+        assert contract.name == "bridge_create"
+        assert contract.domain is None
+
+    def test_pathway_with_domain(self):
+        source = """\
+pathway deploy_bridge for network
+  risk medium
+
+  does:
+    Deploy a bridge.
+
+  steps:
+    1. bridge_create
+"""
+        contract = parse_sg(source)
+        assert contract.name == "deploy_bridge"
+        assert contract.domain == "network"
+
+    def test_pathway_without_domain(self):
+        source = """\
+pathway deploy_bridge
+  risk medium
+
+  does:
+    Deploy a bridge.
+
+  steps:
+    1. bridge_create
+"""
+        contract = parse_sg(source)
+        assert contract.domain is None
+
+    def test_topology_with_domain(self):
+        source = """\
+topology production_server for network
+
+  does:
+    Full production server topology.
+
+  has:
+    management bridge
+      uplink = {uplink}
+"""
+        contract = parse_sg(source)
+        assert contract.name == "production_server"
+        assert contract.domain == "network"
+
+    def test_topology_without_domain(self):
+        source = """\
+topology production_server
+
+  does:
+    Full production server topology.
+"""
+        contract = parse_sg(source)
+        assert contract.domain is None
+
+    def test_existing_contracts_have_no_domain(self):
+        """All existing .sg contracts parse with domain=None."""
+        from pathlib import Path
+        from sg.contracts import ContractStore
+        contracts_dir = Path(__file__).parent.parent / "contracts"
+        store = ContractStore.open(contracts_dir)
+        for name, gene in store.genes.items():
+            assert gene.domain is None, f"gene {name} has unexpected domain"
+        for name, pathway in store.pathways.items():
+            assert pathway.domain is None, f"pathway {name} has unexpected domain"
+        for name, topology in store.topologies.items():
+            assert topology.domain is None, f"topology {name} has unexpected domain"

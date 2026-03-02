@@ -57,6 +57,7 @@ class GeneContract:
     family: GeneFamily
     risk: BlastRadius
     does: str
+    domain: str | None = None
     takes: list[FieldDef] = field(default_factory=list)
     gives: list[FieldDef] = field(default_factory=list)
     types: list[TypeDef] = field(default_factory=list)
@@ -109,6 +110,7 @@ class PathwayContract:
     name: str
     risk: BlastRadius
     does: str
+    domain: str | None = None
     takes: list[FieldDef] = field(default_factory=list)
     steps: list[PathwayStep | ForStep | ConditionalStep] = field(default_factory=list)
     requires: list[Dependency] = field(default_factory=list)
@@ -130,6 +132,7 @@ class TopologyContract:
     """Parsed topology contract from a .sg file."""
     name: str
     does: str
+    domain: str | None = None
     takes: list[FieldDef] = field(default_factory=list)
     has: list[TopologyResource] = field(default_factory=list)
     verify: list[VerifyStep] = field(default_factory=list)

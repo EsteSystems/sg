@@ -85,7 +85,7 @@ class TestTopologyVerifyScheduling:
         execute_topology(topo, json.dumps({
             "bridge_name": "br0",
             "bridge_ifaces": ["eth0"],
-        }), orch)
+        }), orch, orch.kernel.resource_mappers())
 
         assert orch.verify_scheduler.pending_count >= 1
 
@@ -117,7 +117,7 @@ class TestTopologyVerifyScheduling:
         execute_topology(topo, json.dumps({
             "bridge_name": "br0",
             "bridge_ifaces": ["eth0"],
-        }), orch2)
+        }), orch2, orch2.kernel.resource_mappers())
 
         # Should have same count as baseline (gene-level only, no topology-level)
         assert orch2.verify_scheduler.pending_count == baseline_count
@@ -168,7 +168,7 @@ class TestTopologyVerifyScheduling:
             execute_topology(topo, json.dumps({
                 "bond_name": "bond0",
                 "bond_members": ["eth2", "eth3"],
-            }), orch)
+            }), orch, orch.kernel.resource_mappers())
 
         # Verify should NOT be scheduled when topology fails
         assert orch.verify_scheduler.pending_count == 0

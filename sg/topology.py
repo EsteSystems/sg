@@ -91,105 +91,6 @@ def _topological_sort(
     return ordered
 
 
-def _map_bridge(resource: TopologyResource, data: dict) -> TopologyStep:
-    """Map a bridge resource to a pathway or gene call."""
-    props = resource.properties
-
-    if "uplink" in props:
-        # Full management bridge with uplink — use provision_management_bridge
-        input_data = {
-            "bridge_name": data.get("bridge_name", resource.name),
-            "interfaces": data.get("bridge_ifaces", data.get("interfaces", [])),
-            "uplink": _resolve_value(props["uplink"], data),
-            "stp_enabled": True,
-            "forward_delay": data.get("forward_delay", 15),
-        }
-        return TopologyStep(
-            resource_name=resource.name,
-            action="pathway",
-            target="provision_management_bridge",
-            input_json=json.dumps(input_data),
-        )
-
-    if "stp" in props:
-        # Bridge with STP but no uplink
-        input_data = {
-            "bridge_name": data.get("bridge_name", resource.name),
-            "interfaces": data.get("bridge_ifaces", data.get("interfaces", [])),
-            "stp_enabled": True,
-            "forward_delay": data.get("forward_delay", 15),
-        }
-        return TopologyStep(
-            resource_name=resource.name,
-            action="pathway",
-            target="configure_bridge_with_stp",
-            input_json=json.dumps(input_data),
-        )
-
-    # Bare bridge
-    input_data = {
-        "bridge_name": data.get("bridge_name", resource.name),
-        "interfaces": data.get("bridge_ifaces", data.get("interfaces", [])),
-    }
-    return TopologyStep(
-        resource_name=resource.name,
-        action="gene",
-        target="bridge_create",
-        input_json=json.dumps(input_data),
-    )
-
-
-def _map_bond(resource: TopologyResource, data: dict) -> TopologyStep:
-    """Map a bond resource to a gene call."""
-    props = resource.properties
-    input_data = {
-        "bond_name": data.get("bond_name", resource.name),
-        "mode": _resolve_value(props.get("mode", "active-backup"), data),
-        "members": _resolve_value(props.get("members", "[]"), data),
-    }
-    return TopologyStep(
-        resource_name=resource.name,
-        action="gene",
-        target="bond_create",
-        input_json=json.dumps(input_data),
-    )
-
-
-def _map_vlan_bridges(resource: TopologyResource, data: dict) -> TopologyStep:
-    """Map a vlan_bridges resource to a loop gene call."""
-    props = resource.properties
-    vlans = _resolve_value(props.get("vlans", "[]"), data)
-    if isinstance(vlans, str):
-        vlans = json.loads(vlans)
-
-    # Resolve the trunk reference — use the bond name from data
-    trunk_ref = props.get("trunk", "")
-    parent = data.get("bond_name", trunk_ref)
-
-    loop_items = []
-    for vlan_id in vlans:
-        loop_items.append(json.dumps({
-            "parent": parent,
-            "vlan_id": vlan_id,
-        }))
-
-    return TopologyStep(
-        resource_name=resource.name,
-        action="loop_gene",
-        target="vlan_create",
-        input_json="{}",
-        loop_items=loop_items,
-    )
-
-
-# Legacy resource type → mapper function (for backward compat)
-_RESOURCE_MAPPERS = {
-    "bridge": _map_bridge,
-    "bond": _map_bond,
-    "vlan_bridges": _map_vlan_bridges,
-}
-
-
 def decompose(
     topology: TopologyContract,
     input_json: str,
@@ -203,10 +104,11 @@ def decompose(
     4. Map each resource to a pathway/gene call
 
     Args:
-        resource_mappers: Optional domain-specific resource type -> mapper
-            mapping. Falls back to built-in mappers if not provided.
+        resource_mappers: Domain-specific resource type -> mapper mapping.
+            Provided by the kernel via resource_mappers(). Required for
+            topologies that declare resources.
     """
-    mappers = resource_mappers or _RESOURCE_MAPPERS
+    mappers = resource_mappers or {}
     data = json.loads(input_json)
     depends_on = _build_dependency_graph(topology.has)
     ordered = _topological_sort(topology.has, depends_on)

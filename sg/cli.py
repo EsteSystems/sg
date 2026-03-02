@@ -183,6 +183,24 @@ def cmd_init(args: argparse.Namespace) -> None:
                     allele.state = "dominant"
                 pool_seeded += 1
                 print(f"  seeded {locus} from pool → {shas[0][:12]}")
+        # Second pass: cross-domain seeding for loci with no exact match
+        cross_seeded = 0
+        for locus in contract_store.known_loci():
+            if locus in seeded_loci:
+                continue
+            if phenotype.get_dominant(locus) is not None:
+                continue  # already seeded in first pass
+            shas = client.pull(locus, registry, phenotype, seed_pool,
+                               cross_domain=True, contract_store=contract_store)
+            if shas:
+                phenotype.promote(locus, shas[0])
+                allele = registry.get(shas[0])
+                if allele:
+                    allele.state = "dominant"
+                cross_seeded += 1
+                print(f"  seeded {locus} from pool (cross-domain) → {shas[0][:12]}")
+        pool_seeded += cross_seeded
+
         if pool_seeded:
             registry.save_index()
             phenotype.save(root / "phenotype.toml")

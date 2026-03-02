@@ -353,17 +353,35 @@ class PoolClient:
                 push_errors.append(f"{locus}: {e}")
 
         # Pull for all known loci
+        seeded_loci: set[str] = set()
         for locus in contract_store.known_loci():
             try:
                 shas = self.pull(locus, registry, phenotype, pool_name,
                                  contract_store=contract_store)
                 pulled += len(shas)
+                if shas:
+                    seeded_loci.add(locus)
             except Exception as e:
                 pull_errors.append(f"{locus}: {e}")
+
+        # Cross-domain pull for loci with no same-domain results
+        cross_domain_pulled = 0
+        for locus in contract_store.known_loci():
+            if locus in seeded_loci:
+                continue
+            if phenotype.get_dominant(locus) is not None:
+                continue  # already has a dominant
+            try:
+                shas = self.pull(locus, registry, phenotype, pool_name,
+                                 cross_domain=True, contract_store=contract_store)
+                cross_domain_pulled += len(shas)
+            except Exception as e:
+                pull_errors.append(f"{locus} (cross-domain): {e}")
 
         return {
             "pushed": pushed,
             "pulled": pulled,
+            "cross_domain_pulled": cross_domain_pulled,
             "push_errors": push_errors,
             "pull_errors": pull_errors,
         }

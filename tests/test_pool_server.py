@@ -365,6 +365,23 @@ class TestCrossDomain:
         assert resp.status_code == 400
         assert "contract" in resp.json()["error"]
 
+    def test_cross_domain_family_mismatch(self, pool_app):
+        """Configuration allele should not match diagnostic pull."""
+        self._push_network_allele(pool_app)  # pushes configuration
+
+        # Pull with diagnostic family — should not match
+        contract = json.dumps({
+            "domain": "data",
+            "family": "diagnostic",
+            "takes": [{"name": "name", "type": "string", "required": True}],
+            "gives": [{"name": "success", "type": "bool", "required": True}],
+        })
+        resp = pool_app.get(
+            f"/pool/pull/data_check?cross_domain=true&contract={contract}"
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["alleles"]) == 0
+
     def test_same_domain_excluded(self, pool_app):
         self._push_network_allele(pool_app)
 

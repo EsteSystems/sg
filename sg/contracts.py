@@ -289,10 +289,14 @@ def _fields_compatible(
 def contracts_compatible(a: GeneContract, b: GeneContract) -> bool:
     """Check if two gene contracts have compatible takes/gives signatures.
 
-    Compatible means: every required field in `a`'s takes/gives has a matching
-    field in `b` with the same name and type. This is directional — `a` is
-    compatible with `b` if `b` can satisfy `a`'s required interface.
+    Compatible means: gene families match (configuration ↔ configuration,
+    diagnostic ↔ diagnostic) AND every required field in `a`'s takes/gives
+    has a matching field in `b` with the same name and type. This is
+    directional — `a` is compatible with `b` if `b` can satisfy `a`'s
+    required interface.
     """
+    if a.family != b.family:
+        return False
     return (
         _fields_compatible(a.takes, b.takes)
         and _fields_compatible(a.gives, b.gives)

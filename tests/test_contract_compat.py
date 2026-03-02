@@ -109,6 +109,38 @@ class TestContractsCompatible:
         ])
         assert not contracts_compatible(a, b)
 
+    def test_family_mismatch_rejected(self):
+        """Configuration and diagnostic genes are not compatible."""
+        a = GeneContract(
+            name="x", family=GeneFamily.CONFIGURATION,
+            risk=BlastRadius.LOW, does="test", domain=None,
+            takes=[FieldDef(name="name", type="string")],
+            gives=[FieldDef(name="success", type="bool")],
+        )
+        b = GeneContract(
+            name="y", family=GeneFamily.DIAGNOSTIC,
+            risk=BlastRadius.NONE, does="test", domain=None,
+            takes=[FieldDef(name="name", type="string")],
+            gives=[FieldDef(name="success", type="bool")],
+        )
+        assert not contracts_compatible(a, b)
+
+    def test_same_family_compatible(self):
+        """Same family with matching fields is compatible."""
+        a = GeneContract(
+            name="x", family=GeneFamily.DIAGNOSTIC,
+            risk=BlastRadius.NONE, does="test", domain="data",
+            takes=[FieldDef(name="name", type="string")],
+            gives=[FieldDef(name="healthy", type="bool")],
+        )
+        b = GeneContract(
+            name="y", family=GeneFamily.DIAGNOSTIC,
+            risk=BlastRadius.NONE, does="test", domain="network",
+            takes=[FieldDef(name="name", type="string")],
+            gives=[FieldDef(name="healthy", type="bool")],
+        )
+        assert contracts_compatible(a, b)
+
 
 class TestDomainValidation:
     def test_load_file_warns_domain_mismatch(self, tmp_path, caplog):

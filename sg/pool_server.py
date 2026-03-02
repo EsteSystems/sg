@@ -122,9 +122,12 @@ def _contracts_compatible_dicts(a: dict, b: dict) -> bool:
     Same semantics as sg.contracts.contracts_compatible() but operates on
     plain dicts so the server doesn't import the parser.
 
-    Compatible means: every required field in a's takes/gives has a matching
-    field in b with the same name and type.
+    Compatible means: gene families match AND every required field in
+    a's takes/gives has a matching field in b with the same name and type.
     """
+    if a.get("family") != b.get("family"):
+        return False
+
     def _fields_compat(a_fields: list[dict], b_fields: list[dict]) -> bool:
         b_map = {f["name"]: f for f in b_fields}
         for f in a_fields:

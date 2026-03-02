@@ -21,7 +21,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install -e '.[dev,dashboard,federation]'
+        run: |
+          pip install -e ./plugins/network
+          pip install -e ./plugins/data
+          pip install -e '.[dev,dashboard,federation]'
 
       - name: Run tests
         run: python -m pytest tests/ -x -q --tb=short

@@ -1,4 +1,4 @@
-"""CLI: init, run, status, generate, watch, lineage, compete, deploy, dashboard, evolve, share, pull, snapshot, rollback, snapshots, diff, test."""
+"""CLI: init, run, status, generate, watch, lineage, compete, deploy, dashboard, evolve, share, pull, snapshot, rollback, snapshots, diff, test, pool."""
 from __future__ import annotations
 
 import argparse
@@ -542,7 +542,7 @@ def cmd_kernels(args: argparse.Namespace) -> None:
 def cmd_completions(args: argparse.Namespace) -> None:
     """Print shell completion script."""
     subcommands = ("init run deploy generate watch status lineage compete "
-                   "dashboard evolve share pull test diff snapshot rollback snapshots kernels completions")
+                   "dashboard evolve share pull test diff snapshot rollback snapshots pool kernels completions")
     engines = "auto mock claude openai deepseek"
     try:
         kernels = " ".join(list_kernel_names())
@@ -773,6 +773,91 @@ def cmd_diff(args: argparse.Namespace) -> None:
     print(format_diff(diff))
 
 
+def cmd_pool(args: argparse.Namespace) -> None:
+    """Manage gene pool membership and allele sharing."""
+    from sg.pool import PoolClient
+
+    root = get_project_root()
+    client = PoolClient(root)
+
+    subcmd = getattr(args, "pool_command", None)
+    if subcmd is None:
+        print("usage: sg pool {list,push,pull,auto}")
+        return
+
+    if subcmd == "list":
+        pools = client.list_pools()
+        if not pools:
+            print("No pools configured. Create pools.toml")
+            return
+        print("Configured pools:\n")
+        for cfg in pools:
+            membership = client.status(cfg.name)
+            print(f"  {cfg.name}: {cfg.url}")
+            if membership:
+                pushed = membership.total_pushed
+                pulled = membership.total_pulled
+                print(f"    pushed: {pushed}, pulled: {pulled}")
+            else:
+                print(f"    (no activity)")
+        print()
+
+    elif subcmd == "push":
+        registry = Registry.open(root / ".sg" / "registry")
+        phenotype = PhenotypeMap.load(root / "phenotype.toml")
+        pool_name = args.pool
+
+        if getattr(args, "all", False):
+            contract_store = load_contract_store(root)
+            pushed = 0
+            for locus in contract_store.known_loci():
+                if client.push(locus, registry, phenotype, pool_name):
+                    print(f"  pushed {locus}")
+                    pushed += 1
+            print(f"Pushed {pushed} allele(s) to '{pool_name}'")
+        else:
+            if client.push(args.locus, registry, phenotype, pool_name):
+                print(f"Pushed {args.locus} to '{pool_name}'")
+            else:
+                print(f"Push failed for {args.locus} (not eligible or error)")
+
+        registry.save_index()
+        phenotype.save(root / "phenotype.toml")
+
+    elif subcmd == "pull":
+        registry = Registry.open(root / ".sg" / "registry")
+        phenotype = PhenotypeMap.load(root / "phenotype.toml")
+        pool_name = args.pool
+
+        shas = client.pull(args.locus, registry, phenotype, pool_name)
+        if shas:
+            for sha in shas:
+                print(f"  imported {sha[:12]}")
+            registry.save_index()
+            phenotype.save(root / "phenotype.toml")
+        print(f"Pulled {len(shas)} allele(s) for {args.locus} from '{pool_name}'")
+
+    elif subcmd == "auto":
+        registry = Registry.open(root / ".sg" / "registry")
+        phenotype = PhenotypeMap.load(root / "phenotype.toml")
+        contract_store = load_contract_store(root)
+        pool_name = args.pool
+
+        result = client.auto(registry, phenotype, contract_store, pool_name)
+        print(f"Auto sync with '{pool_name}':")
+        print(f"  Pushed: {result['pushed']}")
+        print(f"  Pulled: {result['pulled']}")
+        if result["push_errors"]:
+            for e in result["push_errors"]:
+                print(f"  Push error: {e}")
+        if result["pull_errors"]:
+            for e in result["pull_errors"]:
+                print(f"  Pull error: {e}")
+
+        registry.save_index()
+        phenotype.save(root / "phenotype.toml")
+
+
 def cmd_snapshot(args: argparse.Namespace) -> None:
     """Create a genome snapshot."""
     from sg.snapshot import SnapshotManager
@@ -893,6 +978,19 @@ def main() -> None:
 
     subparsers.add_parser("snapshots", help="list all genome snapshots")
 
+    pool_parser = subparsers.add_parser("pool", help="manage gene pool membership")
+    pool_sub = pool_parser.add_subparsers(dest="pool_command")
+    pool_sub.add_parser("list", help="show configured pools and membership")
+    pool_push = pool_sub.add_parser("push", help="push allele(s) to a pool")
+    pool_push.add_argument("locus", nargs="?", help="locus to push")
+    pool_push.add_argument("--pool", required=True, help="pool name")
+    pool_push.add_argument("--all", action="store_true", help="push all eligible loci")
+    pool_pull = pool_sub.add_parser("pull", help="pull alleles from a pool")
+    pool_pull.add_argument("locus", help="locus to pull")
+    pool_pull.add_argument("--pool", required=True, help="pool name")
+    pool_auto = pool_sub.add_parser("auto", help="automatic push/pull cycle")
+    pool_auto.add_argument("--pool", required=True, help="pool name")
+
     subparsers.add_parser("kernels", help="list available kernels")
 
     comp_parser = subparsers.add_parser("completions", help="generate shell completions")
@@ -937,6 +1035,8 @@ def main() -> None:
         cmd_rollback(args)
     elif args.command == "snapshots":
         cmd_snapshots(args)
+    elif args.command == "pool":
+        cmd_pool(args)
     elif args.command == "kernels":
         cmd_kernels(args)
     elif args.command == "completions":

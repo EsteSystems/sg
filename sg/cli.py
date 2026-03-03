@@ -1232,6 +1232,9 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     """Run the daemon loop."""
     from sg.daemon import Daemon, DaemonConfig
     from sg.events import EventBus
+    from sg.metrics import MetricsCollector
+    from sg.meta_params import MetaParamTracker
+    from sg.audit import AuditLog
 
     root = get_project_root()
     contract_store = load_contract_store(root)
@@ -1244,21 +1247,29 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     pft = PathwayFitnessTracker.open(root / "pathway_fitness.json")
     pr = PathwayRegistry.open(root / ".sg" / "pathway_registry")
     event_bus = EventBus()
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
+    audit_log = AuditLog(root / ".sg" / "audit.jsonl")
+
+    metrics_collector = MetricsCollector()
+    metrics_collector.attach(event_bus)
 
     orch = Orchestrator(
         registry=registry, phenotype=phenotype,
         mutation_engine=mutation_engine, fusion_tracker=fusion_tracker,
         kernel=kernel, contract_store=contract_store,
         project_root=root,
+        audit_log=audit_log,
         pathway_fitness_tracker=pft, pathway_registry=pr,
         event_bus=event_bus,
+        meta_param_tracker=meta_tracker,
     )
 
     config = DaemonConfig(
         tick_interval=getattr(args, "tick_interval", 60.0),
         max_ticks=getattr(args, "max_ticks", None),
     )
-    daemon = Daemon(orch, event_bus=event_bus, config=config)
+    daemon = Daemon(orch, event_bus=event_bus, config=config,
+                    metrics_collector=metrics_collector)
     daemon.start()
 
 
@@ -1307,6 +1318,60 @@ def cmd_contracts(args: argparse.Namespace) -> None:
     else:
         print("Usage: sg contracts {proposals|accept|reject}", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_speciation(args: argparse.Namespace) -> None:
+    """Show speciation analysis."""
+    from sg.speciation import SpeciationTracker
+
+    root = get_project_root()
+    tracker = SpeciationTracker.open(root / ".sg" / "speciation.json")
+    sub = getattr(args, "speciation_command", None)
+
+    if sub == "detect":
+        pairs = tracker.detect_speciation()
+        if not pairs:
+            print("No speciation events detected.")
+            return
+        for a, b in pairs:
+            metric = tracker.compute_divergence(a, b)
+            print(f"  {a} <-> {b}: {metric.divergence_ratio:.2f} divergence "
+                  f"({metric.divergent_loci}/{metric.shared_loci} loci)")
+    elif sub == "divergence":
+        organisms = list(tracker.snapshots.keys())
+        if not organisms:
+            print("No organism snapshots recorded.")
+            return
+        for org in organisms:
+            snaps = tracker.snapshots[org]
+            print(f"  {org}: {len(snaps)} snapshot(s)")
+    else:
+        print("Usage: sg speciation {detect|divergence}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_safety(args: argparse.Namespace) -> None:
+    """Show adaptive safety recommendations."""
+    from sg.adaptation import AdaptiveSafety
+    from sg.audit import AuditLog
+
+    root = get_project_root()
+    contract_store = load_contract_store(root)
+    audit_path = root / ".sg" / "audit.jsonl"
+    if not audit_path.exists():
+        print("No audit log found.")
+        return
+    audit = AuditLog(audit_path)
+    safety = AdaptiveSafety(audit)
+    adjustments = safety.analyze(contract_store)
+    if not adjustments:
+        print("No safety adjustments recommended.")
+        return
+    for adj in adjustments:
+        print(f"  {adj.locus}: {adj.current_risk} -> {adj.recommended_risk}")
+        print(f"    reason: {adj.reason}")
+        print(f"    evidence: {adj.evidence}")
+        print()
 
 
 def cmd_recover(args: argparse.Namespace) -> None:
@@ -1457,6 +1522,13 @@ def main() -> None:
     contracts_reject.add_argument("locus", help="locus name")
     contracts_reject.add_argument("index", type=int, help="proposal index")
 
+    spec_parser = subparsers.add_parser("speciation", help="show speciation analysis")
+    spec_sub = spec_parser.add_subparsers(dest="speciation_command")
+    spec_sub.add_parser("detect", help="detect speciation events between organisms")
+    spec_sub.add_parser("divergence", help="show divergence metrics")
+
+    subparsers.add_parser("safety", help="show adaptive safety recommendations")
+
     subparsers.add_parser("recover", help="rebuild registry index from source files")
 
     new_plugin_parser = subparsers.add_parser("new-plugin", help="scaffold a new domain plugin")
@@ -1523,6 +1595,10 @@ def main() -> None:
         cmd_daemon(args)
     elif args.command == "contracts":
         cmd_contracts(args)
+    elif args.command == "speciation":
+        cmd_speciation(args)
+    elif args.command == "safety":
+        cmd_safety(args)
     elif args.command == "recover":
         cmd_recover(args)
     elif args.command == "new-plugin":

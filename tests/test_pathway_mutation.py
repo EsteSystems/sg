@@ -937,3 +937,47 @@ class TestInsertionEdgeCases:
         )
         result = op.apply(ctx)
         assert result is None
+
+
+# --- Throttle convergence criterion (Item 10) ---
+
+
+class FakeStabilizationTracker:
+    def __init__(self, stabilizing=False):
+        self._stabilizing = stabilizing
+
+    def is_stabilizing(self, pathway_name):
+        return self._stabilizing
+
+
+class TestThrottleConvergenceCriterion:
+    def test_blocks_during_stabilization(self):
+        """Throttle blocks mutation when stabilization is in progress."""
+        throttle = PathwayMutationThrottle(
+            cooldown_seconds=0.0,
+            _stabilization_tracker=FakeStabilizationTracker(stabilizing=True),
+        )
+        assert not throttle.can_mutate("my_pathway")
+
+    def test_allows_after_stabilization(self):
+        """Throttle allows mutation when stabilization is complete."""
+        throttle = PathwayMutationThrottle(
+            cooldown_seconds=0.0,
+            _stabilization_tracker=FakeStabilizationTracker(stabilizing=False),
+        )
+        assert throttle.can_mutate("my_pathway")
+
+    def test_no_tracker_time_only(self):
+        """Without stabilization tracker, only time-based check applies."""
+        throttle = PathwayMutationThrottle(cooldown_seconds=0.0)
+        assert throttle._stabilization_tracker is None
+        assert throttle.can_mutate("my_pathway")
+
+    def test_cooldown_takes_precedence(self):
+        """Even when stabilization is done, cooldown still applies."""
+        throttle = PathwayMutationThrottle(
+            cooldown_seconds=9999.0,
+            _stabilization_tracker=FakeStabilizationTracker(stabilizing=False),
+        )
+        throttle.record_mutation("pw")
+        assert not throttle.can_mutate("pw")

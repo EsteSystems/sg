@@ -75,6 +75,7 @@ class OutputObservation:
     total_observations: int = 0
     extra_fields: dict[str, int] = field(default_factory=dict)
     field_value_ranges: dict[str, list[float]] = field(default_factory=dict)
+    precondition_satisfied: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +87,7 @@ class OutputObservation:
                 k: v[:MAX_RANGE_SAMPLES]
                 for k, v in self.field_value_ranges.items()
             },
+            "precondition_satisfied": self.precondition_satisfied,
         }
 
     @classmethod
@@ -96,6 +98,7 @@ class OutputObservation:
             total_observations=d.get("total_observations", 0),
             extra_fields=d.get("extra_fields", {}),
             field_value_ranges=d.get("field_value_ranges", {}),
+            precondition_satisfied=d.get("precondition_satisfied", {}),
         )
 
 
@@ -190,6 +193,13 @@ class ContractEvolution:
                 if len(ranges) > MAX_RANGE_SAMPLES:
                     obs.field_value_ranges[key] = ranges[-MAX_RANGE_SAMPLES:]
 
+        # Track before-condition satisfaction (gene succeeded = preconditions held)
+        if contract and hasattr(contract, 'before') and contract.before:
+            for condition in contract.before:
+                obs.precondition_satisfied[condition] = (
+                    obs.precondition_satisfied.get(condition, 0) + 1
+                )
+
         if obs.total_observations >= TIGHTENING_THRESHOLD:
             proposals = self.analyze_tightening(locus, contract)
             if proposals:
@@ -236,6 +246,23 @@ class ContractEvolution:
                             current_value=f"{field_name} (optional)",
                             proposed_value=f"{field_name} (required)",
                             evidence_count=count,
+                        ))
+
+        # 3. Before conditions that are always satisfied -> propose removal
+        if contract and hasattr(contract, 'before') and contract.before:
+            for condition in contract.before:
+                satisfied_count = obs.precondition_satisfied.get(condition, 0)
+                ratio = satisfied_count / obs.total_observations if obs.total_observations > 0 else 0
+                if ratio >= 0.95:
+                    desc = f"Before condition always satisfied: '{condition}'"
+                    if desc not in existing:
+                        results.append(ContractProposal(
+                            locus=locus,
+                            proposal_type="tighten_before",
+                            description=desc,
+                            current_value=condition,
+                            proposed_value="consider removing redundant precondition",
+                            evidence_count=satisfied_count,
                         ))
 
         self._store_proposals(locus, results)
@@ -344,14 +371,27 @@ class ContractEvolution:
 
     def record_config_fitness(
         self, config_locus: str, fitness: float,
-    ) -> None:
-        """Record config gene fitness for correlation analysis."""
+        contract_store=None,
+    ) -> list[ContractProposal]:
+        """Record config gene fitness for correlation analysis.
+
+        When *contract_store* is provided and a correlation pair has enough
+        samples, triggers feeds discovery analysis automatically.
+        """
+        ready_for_analysis = False
         for key in list(self.correlations):
             corr = self.correlations[key]
             if corr.config_locus == config_locus:
                 corr.config_fitness_values.append(fitness)
                 if len(corr.config_fitness_values) > MAX_RANGE_SAMPLES:
                     corr.config_fitness_values = corr.config_fitness_values[-MAX_RANGE_SAMPLES:]
+                if (len(corr.diagnostic_values) >= MIN_CORRELATION_SAMPLES
+                        and len(corr.config_fitness_values) >= MIN_CORRELATION_SAMPLES):
+                    ready_for_analysis = True
+
+        if ready_for_analysis and contract_store is not None:
+            return self.analyze_feeds(contract_store)
+        return []
 
     def ensure_correlation_pair(
         self, diagnostic_locus: str, config_locus: str,

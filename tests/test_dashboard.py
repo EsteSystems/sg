@@ -234,3 +234,39 @@ class TestFederationEndpoints:
         resp = client.get("/api/federation/alleles/bridge_create")
         shas = [a["sha256"][:12] for a in resp.json()["alleles"]]
         assert new_sha in shas
+
+
+# --- Metrics endpoint (Item 9) ---
+
+
+class TestMetricsEndpoint:
+    def test_no_collector(self, dashboard_project):
+        """GET /metrics returns placeholder when no collector configured."""
+        import sg.dashboard as dash
+        dash._metrics_collector = None
+        from fastapi.testclient import TestClient
+        client = TestClient(dash.app)
+        resp = client.get("/metrics")
+        assert resp.status_code == 200
+        assert "No metrics collector" in resp.text
+
+    def test_with_collector(self, dashboard_project):
+        """GET /metrics returns Prometheus exposition format."""
+        from sg.metrics import MetricsCollector
+        from sg.events import EventBus, tick_complete
+        import sg.dashboard as dash
+        collector = MetricsCollector()
+        bus = EventBus()
+        collector.attach(bus)
+        bus.publish(tick_complete(1, 42.0))
+        bus.publish(tick_complete(2, 38.0))
+        dash._metrics_collector = collector
+        try:
+            from fastapi.testclient import TestClient
+            client = TestClient(dash.app)
+            resp = client.get("/metrics")
+            assert resp.status_code == 200
+            assert "sg_daemon_ticks_total" in resp.text
+            assert "2" in resp.text  # 2 ticks
+        finally:
+            dash._metrics_collector = None

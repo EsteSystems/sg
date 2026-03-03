@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from sg.registry import AlleleMetadata
+
+if TYPE_CHECKING:
+    from sg.meta_params import EvolutionaryParams
 
 
 # Timescale weights
@@ -118,6 +122,7 @@ def compute_temporal_fitness(
     allele: AlleleMetadata,
     current_structure_hash: str = "",
     structure_history: tuple[str, ...] | list[str] = (),
+    params: EvolutionaryParams | None = None,
 ) -> float:
     """Compute weighted temporal fitness across three timescales.
 
@@ -125,7 +130,15 @@ def compute_temporal_fitness(
     feedback has been recorded.  When *current_structure_hash* is given,
     records from older structures are discounted progressively using
     *structure_history* (newest-first list of prior structure hashes).
+
+    When *params* is provided, uses its weight values instead of
+    module-level constants.
     """
+    imm_w = params.immediate_weight if params else IMMEDIATE_WEIGHT
+    conv_w = params.convergence_weight if params else CONVERGENCE_WEIGHT
+    res_w = params.resilience_weight if params else RESILIENCE_WEIGHT
+    decay_f = params.convergence_decay_factor if params else CONVERGENCE_DECAY_FACTOR
+
     records = [FitnessRecord.from_dict(r) for r in allele.fitness_records]
 
     # Immediate score from invocation counts (existing mechanism)
@@ -152,7 +165,7 @@ def compute_temporal_fitness(
         if r.timescale == "convergence" and not r.success
     )
     if convergence_failures > 0:
-        decay = max(0.0, 1.0 - CONVERGENCE_DECAY_FACTOR * convergence_failures)
+        decay = max(0.0, 1.0 - decay_f * convergence_failures)
         immediate *= decay
 
     # Default to 1.0 (assume good) for timescales with no data
@@ -160,9 +173,9 @@ def compute_temporal_fitness(
     res_score = resilience if resilience is not None else 1.0
 
     return (
-        immediate * IMMEDIATE_WEIGHT
-        + conv_score * CONVERGENCE_WEIGHT
-        + res_score * RESILIENCE_WEIGHT
+        immediate * imm_w
+        + conv_score * conv_w
+        + res_score * res_w
     )
 
 

@@ -241,3 +241,60 @@ class TestFailureDiscoveryIntegration:
         # The failure discovery should have tracked this pattern
         patterns = orch._failure_discovery.patterns.get(locus, {})
         assert len(patterns) > 0
+
+
+# --- LLM-assisted failure summarization (Item 7) ---
+
+
+class FakeSummarizingEngine:
+    """A mutation engine that supports failure summarization."""
+
+    def summarize_failure(self, locus, pattern, messages):
+        return f"Gene '{locus}' fails when {pattern} occurs ({len(messages)} examples)"
+
+
+class FakeFailingEngine:
+    """A mutation engine that raises on summarization."""
+
+    def summarize_failure(self, locus, pattern, messages):
+        raise RuntimeError("LLM unavailable")
+
+
+class TestLLMFailureSummarization:
+    def test_with_engine_uses_llm(self):
+        """When engine supports summarize_failure, uses LLM output."""
+        fd = FailureDiscovery(mutation_engine=FakeSummarizingEngine())
+        for _ in range(PROPOSAL_THRESHOLD + 1):
+            fd.record_error("bridge_create", "abc", "timeout at 0xFF",
+                            known_fails_when=[])
+        proposals = fd.proposals.get("bridge_create", [])
+        assert len(proposals) >= 1
+        assert "Gene 'bridge_create' fails" in proposals[0].proposed_text
+
+    def test_engine_fallback_on_error(self):
+        """When engine raises, falls back to placeholder."""
+        fd = FailureDiscovery(mutation_engine=FakeFailingEngine())
+        for _ in range(PROPOSAL_THRESHOLD + 1):
+            fd.record_error("bridge_create", "abc", "timeout at 0xFF",
+                            known_fails_when=[])
+        proposals = fd.proposals.get("bridge_create", [])
+        assert len(proposals) >= 1
+        # Should have used placeholder substitution
+        assert "Gene 'bridge_create' fails" not in proposals[0].proposed_text
+
+    def test_no_engine_uses_placeholder(self):
+        """Without engine, uses placeholder substitution."""
+        fd = FailureDiscovery(mutation_engine=None)
+        for _ in range(PROPOSAL_THRESHOLD + 1):
+            fd.record_error("bridge_create", "abc", "error at /path/to/file",
+                            known_fails_when=[])
+        proposals = fd.proposals.get("bridge_create", [])
+        assert len(proposals) >= 1
+        # Placeholder should have replaced <PATH> with "path"
+        assert proposals[0].proposed_text  # non-empty
+
+    def test_open_with_engine(self, tmp_path):
+        """open() passes engine to instance."""
+        fd = FailureDiscovery.open(tmp_path / "fd.json",
+                                   mutation_engine=FakeSummarizingEngine())
+        assert fd._mutation_engine is not None

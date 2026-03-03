@@ -85,3 +85,37 @@ def test_should_demote_three_failures():
 def test_should_not_demote_two_failures():
     a = make_allele(consecutive_failures=2)
     assert not should_demote(a)
+
+
+# --- Tests for custom params (Item 6) ---
+
+
+def test_should_promote_with_custom_params():
+    """Custom params lower the promotion threshold."""
+    from sg.meta_params import EvolutionaryParams
+    params = EvolutionaryParams(promotion_min_invocations=5, promotion_advantage=0.05)
+    candidate = make_allele(successful_invocations=10, failed_invocations=0)
+    dominant = make_allele(sha256="dom", successful_invocations=8, failed_invocations=2)
+    # With defaults (50 invocations min), wouldn't promote
+    assert not should_promote(candidate, dominant)
+    # With custom params (5 min), should promote
+    assert should_promote(candidate, dominant, params=params)
+
+
+def test_should_demote_with_custom_params():
+    """Custom params change the demotion threshold."""
+    from sg.meta_params import EvolutionaryParams
+    params = EvolutionaryParams(demotion_consecutive_failures=5)
+    a = make_allele(consecutive_failures=3)
+    # Default (3) would demote
+    assert should_demote(a)
+    # Custom (5) should not
+    assert not should_demote(a, params=params)
+
+
+def test_params_none_uses_defaults():
+    """Passing params=None preserves default behavior."""
+    candidate = make_allele(successful_invocations=50, failed_invocations=0)
+    assert should_promote(candidate, None, params=None)
+    a = make_allele(consecutive_failures=3)
+    assert should_demote(a, params=None)

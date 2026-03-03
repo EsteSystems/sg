@@ -287,3 +287,53 @@ class TestTwoFamilyFeedback:
             r for r in allele.fitness_records if not r["success"]
         ]
         assert len(unhealthy_records) > 0
+
+
+class TestTemporalFitnessWithParams:
+    """Tests for compute_temporal_fitness with custom params (Item 6)."""
+
+    def test_custom_weights(self):
+        """Custom weight params produce different scores."""
+        from sg.meta_params import EvolutionaryParams
+        a = AlleleMetadata(sha256="x", locus="test")
+        a.successful_invocations = 80
+        a.failed_invocations = 20
+        # convergence=0.0 (all failures)
+        for _ in range(5):
+            record_feedback(a, "convergence", False, "diag1")
+
+        # Default weights: immediate=0.3, convergence=0.5, resilience=0.2
+        default_score = compute_temporal_fitness(a)
+
+        # Custom: all weight on resilience (defaults to 1.0 when no resilience data)
+        params = EvolutionaryParams(
+            immediate_weight=0.0, convergence_weight=0.0, resilience_weight=1.0,
+        )
+        custom_score = compute_temporal_fitness(a, params=params)
+        # With all weight on resilience (no data = 1.0), score should be 1.0
+        assert custom_score == pytest.approx(1.0)
+        # Default score should be lower due to convergence failures
+        assert default_score < custom_score
+
+    def test_custom_decay_factor(self):
+        """Custom convergence decay factor changes decay strength."""
+        from sg.meta_params import EvolutionaryParams
+        a = AlleleMetadata(sha256="x", locus="test")
+        a.successful_invocations = 100
+        a.failed_invocations = 0
+        record_feedback(a, "convergence", False, "diag1")
+
+        # Default decay factor = 0.2
+        default_score = compute_temporal_fitness(a)
+        # Zero decay factor = no decay
+        params = EvolutionaryParams(convergence_decay_factor=0.0)
+        no_decay_score = compute_temporal_fitness(a, params=params)
+        assert no_decay_score > default_score
+
+    def test_params_none_matches_default(self):
+        """params=None produces the same score as no params."""
+        a = AlleleMetadata(sha256="x", locus="test")
+        a.successful_invocations = 80
+        a.failed_invocations = 20
+        record_feedback(a, "convergence", True, "diag1")
+        assert compute_temporal_fitness(a) == compute_temporal_fitness(a, params=None)

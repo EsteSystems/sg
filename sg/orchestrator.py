@@ -83,6 +83,7 @@ class Orchestrator:
         self._stabilization_tracker = StabilizationTracker.open(
             project_root / ".sg" / "stabilization.json"
         )
+        self._pathway_mutation_throttle._stabilization_tracker = self._stabilization_tracker
         from sg.failure_discovery import FailureDiscovery
         self._failure_discovery = FailureDiscovery.open(
             project_root / ".sg" / "failure_discovery.json"
@@ -92,6 +93,10 @@ class Orchestrator:
         )
         self._cross_locus_analyzer = CrossLocusFailureAnalyzer.open(
             project_root / ".sg" / "locus_discovery.json"
+        )
+        from sg.speciation import SpeciationTracker
+        self._speciation_tracker = SpeciationTracker.open(
+            project_root / ".sg" / "speciation.json"
         )
 
     def close(self) -> None:
@@ -467,7 +472,10 @@ class Orchestrator:
         dominant_sha = self.phenotype.get_dominant(locus)
         dominant = self.registry.get(dominant_sha) if dominant_sha else None
 
-        if allele and arena.should_promote(allele, dominant):
+        params = None
+        if self._meta_param_tracker is not None:
+            params = self._meta_param_tracker.get_params(locus)
+        if allele and arena.should_promote(allele, dominant, params=params):
             # Test cross-locus interactions before promoting
             interaction_failures = self._test_promotion_interactions(locus, sha)
             if interaction_failures:
@@ -549,7 +557,9 @@ class Orchestrator:
             record_feedback(target_allele, timescale, healthy, locus,
                            structure_hash=self._current_pathway_structure_hash)
             fitness = arena.compute_fitness(target_allele)
-            self._contract_evolution.record_config_fitness(target_locus, fitness)
+            self._contract_evolution.record_config_fitness(
+                target_locus, fitness, contract_store=self.contract_store,
+            )
             logger.info("feedback %s -> %s (%s: %s, fitness: %.2f)",
                         locus, target_locus, timescale,
                         "healthy" if healthy else "unhealthy", fitness,
@@ -617,7 +627,10 @@ class Orchestrator:
 
     def _check_demotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)
-        if allele and arena.should_demote(allele):
+        params = None
+        if self._meta_param_tracker is not None:
+            params = self._meta_param_tracker.get_params(locus)
+        if allele and arena.should_demote(allele, params=params):
             arena.set_deprecated(allele)
             logger.info("demoted %s for %s (3 consecutive failures)",
                         sha[:12], locus,
@@ -1363,6 +1376,12 @@ class Orchestrator:
             )
         except Exception:
             logger.error("save_state: failed to save locus discovery", exc_info=True)
+        try:
+            self._speciation_tracker.save(
+                self.project_root / ".sg" / "speciation.json"
+            )
+        except Exception:
+            logger.error("save_state: failed to save speciation tracker", exc_info=True)
         if self.topology_registry is not None:
             try:
                 self.topology_registry.save_index()

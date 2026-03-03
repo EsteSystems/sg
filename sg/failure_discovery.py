@@ -102,9 +102,10 @@ class FailureProposal:
 class FailureDiscovery:
     """Tracks novel error patterns and proposes 'fails when' entries."""
 
-    def __init__(self) -> None:
+    def __init__(self, mutation_engine=None) -> None:
         self.patterns: dict[str, dict[str, NovelErrorPattern]] = {}
         self.proposals: dict[str, list[FailureProposal]] = {}
+        self._mutation_engine = mutation_engine
 
     def record_error(
         self,
@@ -173,16 +174,15 @@ class FailureDiscovery:
                 return True
         return False
 
-    @staticmethod
-    def _create_proposal(locus: str, entry: NovelErrorPattern) -> FailureProposal:
-        """Create a human-readable 'fails when' proposal from a pattern."""
-        text = entry.pattern
-        text = text.replace("<N>", "N")
-        text = text.replace("<HEX>", "address")
-        text = text.replace("<HASH>", "hash")
-        text = text.replace("<PATH>", "path")
-        text = text.replace("'<STR>'", "value")
-        text = text.replace('"<STR>"', "value")
+    def _create_proposal(self, locus: str, entry: NovelErrorPattern) -> FailureProposal:
+        """Create a human-readable 'fails when' proposal from a pattern.
+
+        Uses LLM summarization when a mutation engine is available,
+        falling back to placeholder substitution otherwise.
+        """
+        text = self._try_llm_summary(locus, entry)
+        if text is None:
+            text = self._placeholder_summary(entry)
         return FailureProposal(
             locus=locus,
             proposed_text=text,
@@ -190,6 +190,32 @@ class FailureDiscovery:
             occurrence_count=entry.count,
             representative_messages=list(entry.representative_messages),
         )
+
+    def _try_llm_summary(self, locus: str, entry: NovelErrorPattern) -> str | None:
+        """Attempt LLM-based failure summarization."""
+        if self._mutation_engine is None:
+            return None
+        try:
+            if not hasattr(self._mutation_engine, 'summarize_failure'):
+                return None
+            return self._mutation_engine.summarize_failure(
+                locus, entry.pattern, entry.representative_messages,
+            )
+        except Exception:
+            logger.debug("LLM failure summarization unavailable, using placeholder")
+            return None
+
+    @staticmethod
+    def _placeholder_summary(entry: NovelErrorPattern) -> str:
+        """Simple placeholder-based summarization."""
+        text = entry.pattern
+        text = text.replace("<N>", "N")
+        text = text.replace("<HEX>", "address")
+        text = text.replace("<HASH>", "hash")
+        text = text.replace("<PATH>", "path")
+        text = text.replace("'<STR>'", "value")
+        text = text.replace('"<STR>"', "value")
+        return text
 
     def get_proposals(
         self, locus: str, status: str = "pending",
@@ -256,7 +282,7 @@ class FailureDiscovery:
         }
 
     @classmethod
-    def open(cls, path: Path) -> FailureDiscovery:
-        fd = cls()
+    def open(cls, path: Path, mutation_engine=None) -> FailureDiscovery:
+        fd = cls(mutation_engine=mutation_engine)
         fd.load(path)
         return fd

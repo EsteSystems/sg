@@ -66,6 +66,15 @@ class MutationEngine(ABC):
         """Generate a fused gene combining multiple genes into one."""
         raise NotImplementedError("this engine does not support fusion generation")
 
+    def summarize_failure(self, locus: str, pattern: str,
+                          representative_messages: list[str]) -> str:
+        """Summarize a failure pattern into a human-readable 'fails when' entry.
+
+        Receives a normalized error pattern and example messages.
+        Returns a concise description suitable for a contract entry.
+        """
+        raise NotImplementedError("this engine does not support failure summarization")
+
     def generate_contract(self, family: str, context: str,
                           existing_loci: list[str]) -> str:
         """Generate a new .sg contract from context. Returns raw .sg source."""

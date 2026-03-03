@@ -32,10 +32,12 @@ class Daemon:
         orchestrator,
         event_bus=None,
         config: DaemonConfig | None = None,
+        metrics_collector=None,
     ) -> None:
         self.orchestrator = orchestrator
         self.event_bus = event_bus
         self.config = config or DaemonConfig()
+        self.metrics_collector = metrics_collector
         self._running = False
         self._tick_count = 0
 
@@ -97,12 +99,56 @@ class Daemon:
             self.event_bus.publish(tick_complete(self._tick_count, duration_ms))
 
     def _run_health_checks(self) -> None:
-        """Run diagnostic pathways for health checking."""
+        """Run diagnostic pathways and periodic snapshots."""
         logger.debug("running health checks (tick %d)", self._tick_count)
+        # Record speciation snapshot periodically
+        if (self._tick_count % 50 == 0
+                and hasattr(self.orchestrator, '_speciation_tracker')):
+            try:
+                import os
+                organism_id = os.environ.get("SG_ORGANISM_ID", "default")
+                self.orchestrator._speciation_tracker.record_snapshot(
+                    organism_id,
+                    self.orchestrator.phenotype,
+                    self.orchestrator.registry,
+                )
+            except Exception:
+                logger.debug("speciation snapshot failed", exc_info=True)
 
     def _run_auto_tune(self) -> None:
-        """Run adaptive parameter tuning."""
+        """Run adaptive parameter tuning and safety analysis."""
         logger.debug("running auto-tune (tick %d)", self._tick_count)
+
+        # Adaptive parameter tuning
+        if self.orchestrator._meta_param_tracker is not None:
+            try:
+                from sg.adaptation import AdaptiveParamTuner
+                tuner = AdaptiveParamTuner(self.orchestrator._meta_param_tracker)
+                recs = tuner.auto_tune()
+                if recs:
+                    logger.info("auto-tune applied %d recommendation(s)", len(recs))
+                    for rec in recs:
+                        logger.info("  %s.%s: %.4f -> %.4f (%s)",
+                                    rec.entity_name, rec.param_name,
+                                    rec.current_value, rec.recommended_value,
+                                    rec.reason)
+            except Exception:
+                logger.exception("auto-tune failed")
+
+        # Adaptive safety analysis (advisory only — logged, not auto-applied)
+        if self.orchestrator.audit_log is not None:
+            try:
+                from sg.adaptation import AdaptiveSafety
+                safety = AdaptiveSafety(self.orchestrator.audit_log)
+                adjustments = safety.analyze(self.orchestrator.contract_store)
+                if adjustments:
+                    logger.info("safety analysis: %d recommendation(s)", len(adjustments))
+                    for adj in adjustments:
+                        logger.info("  %s: %s -> %s (%s)",
+                                    adj.locus, adj.current_risk,
+                                    adj.recommended_risk, adj.reason)
+            except Exception:
+                logger.exception("safety analysis failed")
 
     def _install_signal_handlers(self) -> None:
         """Install SIGTERM/SIGINT handlers for graceful shutdown."""

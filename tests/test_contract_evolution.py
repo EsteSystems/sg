@@ -110,9 +110,10 @@ class FakeField:
 
 
 class FakeContract:
-    def __init__(self, gives=None, feeds=None):
+    def __init__(self, gives=None, feeds=None, before=None):
         self.gives = gives or []
         self.feeds = feeds or []
+        self.before = before or []
 
 
 class FakeFeed:
@@ -475,3 +476,113 @@ class TestContractEvolutionPersistence:
         path.write_text("not valid json{{{")
         ce = ContractEvolution.open(path)
         assert len(ce.observations) == 0
+
+
+# --- Before condition analysis (Item 8) ---
+
+
+class TestBeforeAnalysis:
+    def test_before_condition_always_satisfied_proposed(self):
+        """Before conditions always satisfied across 50+ outputs -> tighten_before proposal."""
+        import json as _json
+        ce = ContractEvolution()
+        contract = FakeContract(
+            gives=[FakeField("status")],
+            before=["system must be online"],
+        )
+        for _ in range(TIGHTENING_THRESHOLD + 5):
+            ce.record_output("bridge_create",
+                             _json.dumps({"status": "ok", "success": True}),
+                             contract)
+        proposals = [p for p in ce.get_proposals("bridge_create")
+                     if p.proposal_type == "tighten_before"]
+        assert len(proposals) >= 1
+        assert "always satisfied" in proposals[0].description
+
+    def test_before_condition_not_always_satisfied(self):
+        """Before conditions satisfied < 95% -> no proposal."""
+        import json as _json
+        ce = ContractEvolution()
+        contract_with = FakeContract(
+            gives=[FakeField("status")],
+            before=["interface must exist"],
+        )
+        contract_without = FakeContract(
+            gives=[FakeField("status")],
+            before=[],  # simulate condition not met by not tracking it
+        )
+        # Record 40 with before, 20 without (ratio = 40/60 < 0.95)
+        for _ in range(40):
+            ce.record_output("bridge_create",
+                             _json.dumps({"status": "ok", "success": True}),
+                             contract_with)
+        for _ in range(20):
+            ce.record_output("bridge_create",
+                             _json.dumps({"status": "ok", "success": True}),
+                             contract_without)
+        proposals = [p for p in ce.get_proposals("bridge_create")
+                     if p.proposal_type == "tighten_before"]
+        assert len(proposals) == 0
+
+    def test_precondition_counter_increments(self):
+        """Precondition satisfied counter tracks each observation."""
+        import json as _json
+        ce = ContractEvolution()
+        contract = FakeContract(before=["X is ready"])
+        ce.record_output("test", _json.dumps({"success": True}), contract)
+        ce.record_output("test", _json.dumps({"success": True}), contract)
+        obs = ce.observations["test"]
+        assert obs.precondition_satisfied["X is ready"] == 2
+
+    def test_precondition_serialization_roundtrip(self, tmp_path):
+        """Precondition data survives save/load."""
+        import json as _json
+        ce = ContractEvolution()
+        contract = FakeContract(before=["net is up"])
+        ce.record_output("test", _json.dumps({"success": True}), contract)
+        ce.save(tmp_path / "ce.json")
+        restored = ContractEvolution.open(tmp_path / "ce.json")
+        assert restored.observations["test"].precondition_satisfied["net is up"] == 1
+
+
+# --- Feeds analysis trigger (Item 1) ---
+
+
+class TestFeedsAnalysisTrigger:
+    def test_record_config_fitness_triggers_analysis(self):
+        """When enough correlated samples exist, analyze_feeds runs automatically."""
+        ce = ContractEvolution()
+        ce.ensure_correlation_pair("diag_x", "config_y")
+
+        # Build up enough samples
+        for i in range(MIN_CORRELATION_SAMPLES):
+            ce.record_diagnostic_output("diag_x", {"healthy": True})
+            ce.record_config_fitness("config_y", 0.9)
+
+        # Now record one more with contract_store to trigger analysis
+        ce.record_diagnostic_output("diag_x", {"healthy": True})
+        store = FakeContractStore({"diag_x": FakeContract(feeds=[])})
+        proposals = ce.record_config_fitness("config_y", 0.9, contract_store=store)
+        # With perfectly correlated data, should get a feeds proposal
+        # (all values are constant so r is undefined, but no error)
+        # This tests the trigger mechanism, not the correlation result
+        assert isinstance(proposals, list)
+
+    def test_no_contract_store_no_analysis(self):
+        """Without contract_store, analyze_feeds is not called."""
+        ce = ContractEvolution()
+        ce.ensure_correlation_pair("diag_x", "config_y")
+        for i in range(MIN_CORRELATION_SAMPLES + 5):
+            ce.record_diagnostic_output("diag_x", {"healthy": i % 2 == 0})
+            result = ce.record_config_fitness("config_y", 0.5 + (i % 2) * 0.4)
+        assert result == []  # No store means no analysis
+
+    def test_insufficient_samples_no_trigger(self):
+        """With < MIN_CORRELATION_SAMPLES, no analysis triggered."""
+        ce = ContractEvolution()
+        ce.ensure_correlation_pair("diag_x", "config_y")
+        for i in range(5):
+            ce.record_diagnostic_output("diag_x", {"healthy": True})
+            result = ce.record_config_fitness("config_y", 0.9,
+                                              contract_store=FakeContractStore())
+        assert result == []

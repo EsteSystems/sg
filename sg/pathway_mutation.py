@@ -56,13 +56,23 @@ class PathwayMutationResult:
 
 @dataclass
 class PathwayMutationThrottle:
-    """Rate-limits pathway mutation to avoid structural oscillation."""
+    """Rate-limits pathway mutation to avoid structural oscillation.
+
+    Checks both time-based cooldown and stabilization convergence
+    when a stabilization tracker is available.
+    """
     cooldown_seconds: float = DEFAULT_MUTATION_COOLDOWN_HOURS * 3600
     _last_mutation: dict[str, float] = field(default_factory=dict)
+    _stabilization_tracker: object | None = field(default=None, repr=False)
 
     def can_mutate(self, pathway_name: str) -> bool:
         last = self._last_mutation.get(pathway_name, 0.0)
-        return (time.time() - last) >= self.cooldown_seconds
+        if (time.time() - last) < self.cooldown_seconds:
+            return False
+        if self._stabilization_tracker is not None:
+            if self._stabilization_tracker.is_stabilizing(pathway_name):
+                return False
+        return True
 
     def record_mutation(self, pathway_name: str) -> None:
         self._last_mutation[pathway_name] = time.time()

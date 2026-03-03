@@ -9,7 +9,12 @@ Demotion: 3 consecutive failures.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sg.registry import AlleleMetadata, AlleleState
+
+if TYPE_CHECKING:
+    from sg.meta_params import EvolutionaryParams
 
 
 MIN_INVOCATIONS_FOR_SCORE = 10
@@ -22,12 +27,13 @@ def compute_fitness(
     allele: AlleleMetadata,
     current_structure_hash: str = "",
     structure_history: tuple[str, ...] | list[str] = (),
+    params: EvolutionaryParams | None = None,
 ) -> float:
     """Compute fitness, using temporal scoring when feedback records exist."""
     if allele.fitness_records:
         from sg.fitness import compute_temporal_fitness
         return compute_temporal_fitness(
-            allele, current_structure_hash, structure_history,
+            allele, current_structure_hash, structure_history, params=params,
         )
     total = allele.total_invocations
     if total == 0:
@@ -64,18 +70,28 @@ def record_failure(allele: AlleleMetadata) -> None:
     allele.consecutive_failures += 1
 
 
-def should_promote(candidate: AlleleMetadata, dominant: AlleleMetadata | None) -> bool:
-    if candidate.total_invocations < PROMOTION_MIN_INVOCATIONS:
+def should_promote(
+    candidate: AlleleMetadata,
+    dominant: AlleleMetadata | None,
+    params: EvolutionaryParams | None = None,
+) -> bool:
+    min_invocations = params.promotion_min_invocations if params else PROMOTION_MIN_INVOCATIONS
+    advantage = params.promotion_advantage if params else PROMOTION_ADVANTAGE
+    if candidate.total_invocations < min_invocations:
         return False
     candidate_fitness = compute_fitness(candidate)
     if dominant is None:
         return candidate_fitness > 0.0
     dominant_fitness = compute_fitness(dominant)
-    return candidate_fitness >= dominant_fitness + PROMOTION_ADVANTAGE
+    return candidate_fitness >= dominant_fitness + advantage
 
 
-def should_demote(allele: AlleleMetadata) -> bool:
-    return allele.consecutive_failures >= DEMOTION_CONSECUTIVE_FAILURES
+def should_demote(
+    allele: AlleleMetadata,
+    params: EvolutionaryParams | None = None,
+) -> bool:
+    threshold = params.demotion_consecutive_failures if params else DEMOTION_CONSECUTIVE_FAILURES
+    return allele.consecutive_failures >= threshold
 
 
 def set_dominant(allele: AlleleMetadata) -> None:

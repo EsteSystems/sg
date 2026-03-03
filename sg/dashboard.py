@@ -30,6 +30,7 @@ app = FastAPI(title="Software Genome Dashboard")
 
 # Project root — set at startup
 _project_root: Path = Path(".")
+_metrics_collector = None  # type: ignore
 
 
 def _load_state():
@@ -467,15 +468,36 @@ load(); setInterval(load, 5000);
 </body></html>"""
 
 
+@app.get("/metrics")
+def prometheus_metrics():
+    """Export Prometheus metrics."""
+    from fastapi.responses import PlainTextResponse
+    if _metrics_collector is None:
+        return PlainTextResponse(
+            "# No metrics collector configured\n",
+            media_type="text/plain",
+        )
+    return PlainTextResponse(
+        _metrics_collector.export(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard_html():
     return _DASHBOARD_HTML
 
 
-def run_dashboard(root: Path, host: str = "127.0.0.1", port: int = 8420) -> None:
+def run_dashboard(
+    root: Path,
+    host: str = "127.0.0.1",
+    port: int = 8420,
+    metrics_collector=None,
+) -> None:
     """Start the dashboard server."""
-    global _project_root
+    global _project_root, _metrics_collector
     _project_root = root
+    _metrics_collector = metrics_collector
     import uvicorn
     logger.info("Starting dashboard at http://%s:%d", host, port)
     uvicorn.run(app, host=host, port=port, log_level="warning")

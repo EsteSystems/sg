@@ -68,7 +68,16 @@ class Orchestrator:
         self.decomposition_detector = DecompositionDetector.open(self._decomposition_path)
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
         self._current_pathway_context: str | None = None
+        self._current_pathway_structure_hash: str = ""
         self._pathway_mutation_throttle = self._load_pathway_mutation_throttle()
+        from sg.stabilization import StabilizationTracker
+        self._stabilization_tracker = StabilizationTracker.open(
+            project_root / ".sg" / "stabilization.json"
+        )
+        from sg.failure_discovery import FailureDiscovery
+        self._failure_discovery = FailureDiscovery.open(
+            project_root / ".sg" / "failure_discovery.json"
+        )
 
     def _audit(self, event: str, locus: str = "", sha: str = "",
                 **details) -> None:
@@ -146,6 +155,15 @@ class Orchestrator:
                                     len(rolled), extra={"locus": locus})
                 last_error = str(e)
                 self.decomposition_detector.record_error(locus, sha, last_error)
+                gene_contract = self.contract_store.get_gene(locus)
+                known_fails = gene_contract.fails_when if gene_contract else []
+                proposal = self._failure_discovery.record_error(
+                    locus, sha, last_error, known_fails,
+                )
+                if proposal:
+                    self._audit("failure_mode_discovered", locus=locus,
+                                pattern=proposal.pattern,
+                                count=proposal.occurrence_count)
                 arena.record_failure(allele)
                 self._check_demotion(locus, sha)
                 logger.warning("failed via %s: %s", sha[:12], e,
@@ -474,7 +492,8 @@ class Orchestrator:
             if target_allele is None:
                 continue
 
-            record_feedback(target_allele, timescale, healthy, locus)
+            record_feedback(target_allele, timescale, healthy, locus,
+                           structure_hash=self._current_pathway_structure_hash)
             fitness = arena.compute_fitness(target_allele)
             logger.info("feedback %s -> %s (%s: %s, fitness: %.2f)",
                         locus, target_locus, timescale,
@@ -688,10 +707,12 @@ class Orchestrator:
             pathway = self._pathway_from_allele(pw_allele, default_pathway)
 
             try:
+                self._current_pathway_structure_hash = pw_allele.structure_sha
                 outputs = self._execute_single_pathway(
                     pathway, pathway_name, input_json, on_failure,
                 )
                 pathway_arena.record_pathway_success(pw_allele)
+                self._record_stabilization_fitness(pathway_name)
                 self._check_pathway_promotion(pathway_name, sha)
                 return outputs
             except RuntimeError as e:
@@ -704,6 +725,8 @@ class Orchestrator:
                     extra={"pathway": pathway_name, "sha": sha[:12]},
                 )
                 continue
+            finally:
+                self._current_pathway_structure_hash = ""
 
         # Attempt pathway mutation before giving up
         self._try_pathway_mutation(pathway_name, default_pathway)
@@ -817,10 +840,16 @@ class Orchestrator:
         dominant = self.pathway_registry.get(dominant_sha) if dominant_sha else None
 
         if allele and pathway_arena.should_promote_pathway(allele, dominant):
+            old_structure_hash = dominant.structure_sha if dominant else ""
             pathway_arena.set_pathway_dominant(allele)
             if dominant:
                 pathway_arena.set_pathway_recessive(dominant)
             self.phenotype.promote_pathway(pathway_name, sha)
+            if old_structure_hash:
+                self._tag_gene_fitness_records(pathway_name, old_structure_hash)
+            self._stabilization_tracker.start_stabilization(
+                pathway_name, sha, self._pathway_loci(pathway_name),
+            )
             logger.info("promoted pathway allele %s for %s",
                         sha[:12], pathway_name,
                         extra={"pathway": pathway_name, "sha": sha[:12],
@@ -839,6 +868,72 @@ class Orchestrator:
                         extra={"pathway": pathway_name, "sha": sha[:12],
                                "event": "pathway_demotion"})
             self._audit("pathway_demotion", locus=pathway_name, sha=sha)
+
+    def _pathway_loci(self, pathway_name: str) -> list[str]:
+        """Extract gene locus names from a pathway contract's steps."""
+        from sg.parser.types import PathwayStep as ASTPathwayStep
+        contract = self.contract_store.get_pathway(pathway_name)
+        if contract is None:
+            return []
+        return [s.locus for s in contract.steps
+                if isinstance(s, ASTPathwayStep) and not s.is_pathway_ref]
+
+    def _tag_gene_fitness_records(
+        self, pathway_name: str, old_structure_hash: str,
+    ) -> None:
+        """After pathway promotion, tag untagged gene fitness records with old hash."""
+        for locus in self._pathway_loci(pathway_name):
+            dom_sha = self.phenotype.get_dominant(locus)
+            if not dom_sha:
+                continue
+            allele = self.registry.get(dom_sha)
+            if allele is None:
+                continue
+            for rec in allele.fitness_records:
+                if not rec.get("structure_hash"):
+                    rec["structure_hash"] = old_structure_hash
+
+    def _record_stabilization_fitness(self, pathway_name: str) -> None:
+        """Record current gene fitness for stabilization tracking."""
+        if not self._stabilization_tracker.is_stabilizing(pathway_name):
+            return
+        for locus in self._pathway_loci(pathway_name):
+            dom_sha = self.phenotype.get_dominant(locus)
+            if not dom_sha:
+                continue
+            allele = self.registry.get(dom_sha)
+            if allele is None:
+                continue
+            fitness = arena.compute_fitness(allele)
+            self._stabilization_tracker.record_gene_fitness(
+                pathway_name, locus, fitness,
+            )
+
+    def _consider_pathway_revert(self, pathway_name: str) -> None:
+        """Consider reverting a pathway promotion if stabilization timed out."""
+        if self.pathway_registry is None:
+            return
+        current_sha = self.phenotype.get_pathway_dominant(pathway_name)
+        if current_sha is None:
+            return
+        current = self.pathway_registry.get(current_sha)
+        if current is None or current.parent_sha is None:
+            return
+        parent = self.pathway_registry.get(current.parent_sha)
+        if parent is None:
+            return
+        current_fitness = pathway_arena.compute_pathway_fitness(current)
+        parent_fitness = pathway_arena.compute_pathway_fitness(parent)
+        if current_fitness < parent_fitness:
+            pathway_arena.set_pathway_recessive(current)
+            pathway_arena.set_pathway_dominant(parent)
+            self.phenotype.promote_pathway(pathway_name, parent.structure_sha)
+            logger.warning(
+                "reverted pathway '%s' to parent %s after stabilization timeout",
+                pathway_name, parent.structure_sha[:12],
+            )
+            self._audit("pathway_revert", locus=pathway_name,
+                        sha=parent.structure_sha, reason="stabilization_timeout")
 
     def _load_pathway_mutation_throttle(self) -> PathwayMutationThrottle:
         """Load pathway mutation throttle from disk or create fresh."""
@@ -861,6 +956,14 @@ class Orchestrator:
             return None
         if self.pathway_fitness_tracker is None:
             return None
+        if self._stabilization_tracker.is_stabilizing(pathway_name):
+            status = self._stabilization_tracker.check_stabilization(pathway_name)
+            if status == "stabilizing":
+                logger.info("pathway mutation blocked: stabilization in progress for '%s'",
+                            pathway_name)
+                return None
+            if status == "timed_out":
+                self._consider_pathway_revert(pathway_name)
         if not self._pathway_mutation_throttle.can_mutate(pathway_name):
             logger.info("pathway mutation throttled for '%s'", pathway_name)
             return None
@@ -1017,3 +1120,9 @@ class Orchestrator:
                 self._pathway_mutation_throttle.to_dict(), indent=2,
             ))
         self.decomposition_detector.save(self._decomposition_path)
+        self._stabilization_tracker.save(
+            self.project_root / ".sg" / "stabilization.json"
+        )
+        self._failure_discovery.save(
+            self.project_root / ".sg" / "failure_discovery.json"
+        )

@@ -18,11 +18,14 @@ PROMOTION_MIN_INVOCATIONS = 50
 DEMOTION_CONSECUTIVE_FAILURES = 3
 
 
-def compute_fitness(allele: AlleleMetadata) -> float:
+def compute_fitness(
+    allele: AlleleMetadata,
+    current_structure_hash: str = "",
+) -> float:
     """Compute fitness, using temporal scoring when feedback records exist."""
     if allele.fitness_records:
         from sg.fitness import compute_temporal_fitness
-        return compute_temporal_fitness(allele)
+        return compute_temporal_fitness(allele, current_structure_hash)
     total = allele.total_invocations
     if total == 0:
         return 0.0

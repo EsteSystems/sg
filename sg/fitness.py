@@ -26,6 +26,9 @@ CONVERGENCE_DECAY_FACTOR = 0.2
 # Maximum fitness records kept per allele (sliding window)
 MAX_FITNESS_RECORDS = 200
 
+# Discount factor for fitness records recorded under a different pathway structure
+OLD_STRUCTURE_WEIGHT = 0.5
+
 
 @dataclass
 class FitnessRecord:
@@ -34,14 +37,18 @@ class FitnessRecord:
     success: bool
     source_locus: str  # which locus produced this observation
     timestamp: float = field(default_factory=time.time)
+    structure_hash: str = ""  # pathway structure context when recorded
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "timescale": self.timescale,
             "success": self.success,
             "source": self.source_locus,
             "timestamp": self.timestamp,
         }
+        if self.structure_hash:
+            d["structure_hash"] = self.structure_hash
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> FitnessRecord:
@@ -50,23 +57,45 @@ class FitnessRecord:
             success=d["success"],
             source_locus=d.get("source", ""),
             timestamp=d.get("timestamp", 0.0),
+            structure_hash=d.get("structure_hash", ""),
         )
 
 
-def _score_for_timescale(records: list[FitnessRecord], timescale: str) -> float | None:
-    """Compute score for a single timescale. Returns None if no records."""
+def _score_for_timescale(
+    records: list[FitnessRecord],
+    timescale: str,
+    current_structure_hash: str = "",
+) -> float | None:
+    """Compute score for a single timescale. Returns None if no records.
+
+    When *current_structure_hash* is provided, records from a different
+    structure are discounted by OLD_STRUCTURE_WEIGHT.
+    """
     relevant = [r for r in records if r.timescale == timescale]
     if not relevant:
         return None
-    successes = sum(1 for r in relevant if r.success)
-    return successes / len(relevant)
+    weighted_successes = 0.0
+    total_weight = 0.0
+    for r in relevant:
+        w = 1.0
+        if (current_structure_hash and r.structure_hash
+                and r.structure_hash != current_structure_hash):
+            w = OLD_STRUCTURE_WEIGHT
+        total_weight += w
+        if r.success:
+            weighted_successes += w
+    return weighted_successes / total_weight if total_weight > 0 else 0.0
 
 
-def compute_temporal_fitness(allele: AlleleMetadata) -> float:
+def compute_temporal_fitness(
+    allele: AlleleMetadata,
+    current_structure_hash: str = "",
+) -> float:
     """Compute weighted temporal fitness across three timescales.
 
     Falls back to simple fitness (immediate only) when no diagnostic
-    feedback has been recorded.
+    feedback has been recorded.  When *current_structure_hash* is given,
+    records from older structures are discounted.
     """
     records = [FitnessRecord.from_dict(r) for r in allele.fitness_records]
 
@@ -77,8 +106,8 @@ def compute_temporal_fitness(allele: AlleleMetadata) -> float:
     immediate = allele.successful_invocations / max(total, 10)
 
     # Convergence and resilience from diagnostic feedback
-    convergence = _score_for_timescale(records, "convergence")
-    resilience = _score_for_timescale(records, "resilience")
+    convergence = _score_for_timescale(records, "convergence", current_structure_hash)
+    resilience = _score_for_timescale(records, "resilience", current_structure_hash)
 
     # If no diagnostic feedback, return simple fitness (backward compat)
     if convergence is None and resilience is None:
@@ -109,12 +138,14 @@ def record_feedback(
     timescale: str,
     success: bool,
     source_locus: str,
+    structure_hash: str = "",
 ) -> None:
     """Record a diagnostic feedback observation against a config allele."""
     record = FitnessRecord(
         timescale=timescale,
         success=success,
         source_locus=source_locus,
+        structure_hash=structure_hash,
     )
     allele.fitness_records.append(record.to_dict())
     # Sliding window: keep only the most recent records

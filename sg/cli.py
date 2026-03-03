@@ -770,7 +770,16 @@ def cmd_dashboard(args: argparse.Namespace) -> None:
 
 
 def cmd_evolve(args: argparse.Namespace) -> None:
-    """Generate a new contract via LLM."""
+    """Generate a new contract via LLM, or show discovered failure modes."""
+    discover = getattr(args, "discover_failures", None)
+    if discover:
+        _show_failure_discoveries(args, discover)
+        return
+
+    if not args.context:
+        print("error: --context is required when generating a contract", file=sys.stderr)
+        sys.exit(1)
+
     root = get_project_root()
     contract_store = load_contract_store(root)
     kernel = make_kernel(args)
@@ -801,6 +810,42 @@ def cmd_evolve(args: argparse.Namespace) -> None:
     print(f"  Written to: {out_path}")
     print(f"  Family: {contract.family.value}")
     print(f"  Risk: {contract.risk.value}")
+
+
+def _show_failure_discoveries(args: argparse.Namespace, locus: str) -> None:
+    """Display pending failure mode proposals for a locus."""
+    from sg.failure_discovery import FailureDiscovery
+
+    root = get_project_root()
+    fd = FailureDiscovery.open(root / ".sg" / "failure_discovery.json")
+
+    if locus == "all":
+        all_proposals = fd.get_all_proposals()
+        if not all_proposals:
+            print("No pending failure mode proposals.")
+            return
+        for loc, proposals in sorted(all_proposals.items()):
+            print(f"\n{loc}:")
+            for p in proposals:
+                _print_proposal(p)
+    else:
+        proposals = fd.get_proposals(locus)
+        if not proposals:
+            print(f"No pending failure mode proposals for '{locus}'.")
+            return
+        print(f"\n{locus}:")
+        for p in proposals:
+            _print_proposal(p)
+
+
+def _print_proposal(p) -> None:
+    """Print a single failure proposal."""
+    print(f"  proposed:  fails when {p.proposed_text}")
+    print(f"  pattern:   {p.pattern}")
+    print(f"  seen:      {p.occurrence_count} times")
+    if p.representative_messages:
+        print(f"  example:   {p.representative_messages[0][:120]}")
+    print()
 
 
 def cmd_share(args: argparse.Namespace) -> None:
@@ -1235,8 +1280,10 @@ def main() -> None:
     evolve_parser.add_argument("--family", default="diagnostic",
                                choices=["configuration", "diagnostic"],
                                help="gene family (default: diagnostic)")
-    evolve_parser.add_argument("--context", required=True,
+    evolve_parser.add_argument("--context", default="",
                                help="description of what the new gene should do")
+    evolve_parser.add_argument("--discover-failures", metavar="LOCUS",
+                               help="show pending failure mode proposals (use 'all' for all loci)")
 
     share_parser = subparsers.add_parser("share", help="push successful alleles to peers")
     share_parser.add_argument("locus", help="locus to share")

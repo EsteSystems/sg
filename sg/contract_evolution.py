@@ -416,7 +416,7 @@ class ContractEvolution:
             gc = contract_store.get_gene(locus_name)
             if gc and gc.feeds:
                 for fd in gc.feeds:
-                    existing_feeds.add((locus_name, fd.target))
+                    existing_feeds.add((locus_name, fd.target_locus))
 
         existing_descs = set()
         for proposals in self.proposals.values():

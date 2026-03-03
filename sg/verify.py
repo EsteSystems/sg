@@ -124,6 +124,25 @@ class VerifyScheduler:
         for timer in timers:
             timer.join(timeout=2.0)
 
+    def process_ready(self, orchestrator: Orchestrator) -> int:
+        """Clean up completed verify timers. Returns count of completed timers joined.
+
+        In daemon mode, timers fire on background threads automatically.
+        This method joins completed timers and removes them from the list,
+        preventing unbounded accumulation during long daemon runs.
+        """
+        processed = 0
+        with self._lock:
+            still_alive = []
+            for timer in self._timers:
+                if not timer.is_alive():
+                    timer.join(timeout=1.0)
+                    processed += 1
+                else:
+                    still_alive.append(timer)
+            self._timers = still_alive
+        return processed
+
     @property
     def pending_count(self) -> int:
         """Number of scheduled timers (for testing)."""

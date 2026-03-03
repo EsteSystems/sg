@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable
 
 from sg.events import tick_complete
 from sg.log import get_logger
@@ -22,6 +23,7 @@ class DaemonConfig:
     health_check_interval: int = 5
     auto_tune_interval: int = 100
     max_ticks: int | None = None
+    workload: Callable | None = field(default=None, repr=False)
 
 
 class Daemon:
@@ -100,14 +102,22 @@ class Daemon:
             if self._tick_count % self.config.health_check_interval == 0:
                 self._run_health_checks()
 
-            # 2. Process verify queue
+            # 2. Run workload (if configured)
+            if self.config.workload is not None:
+                try:
+                    self.config.workload(self.orchestrator, self._tick_count)
+                except Exception:
+                    logger.debug("workload failed on tick %d",
+                                 self._tick_count, exc_info=True)
+
+            # 3. Process verify queue
             self.orchestrator.verify_scheduler.process_ready(self.orchestrator)
 
-            # 3. Auto-tune at intervals
+            # 4. Auto-tune at intervals
             if self._tick_count % self.config.auto_tune_interval == 0:
                 self._run_auto_tune()
 
-            # 4. Save state
+            # 5. Save state
             self.orchestrator.save_state()
 
         except Exception:

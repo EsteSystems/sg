@@ -9,6 +9,8 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+from sg.filelock import file_lock
+
 from sg.registry import AlleleMetadata
 from sg import arena
 
@@ -79,7 +81,8 @@ class RegressionDetector:
     def save(self, path: Path) -> None:
         """Persist regression history to JSON."""
         data = {sha: h.to_dict() for sha, h in self.history.items()}
-        path.write_text(json.dumps(data, indent=2))
+        with file_lock(path):
+            path.write_text(json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         """Load regression history from JSON."""

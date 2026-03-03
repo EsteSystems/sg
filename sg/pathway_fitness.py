@@ -10,12 +10,14 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sg.filelock import file_lock
 from sg.log import get_logger
 
 logger = get_logger("pathway_fitness")
 
 MAX_STEP_TIMINGS = 50
 MAX_EXECUTION_WINDOW = 100
+MAX_INPUT_CLUSTERS = 20
 ANOMALY_THRESHOLD = 2.0
 INPUT_TRUNCATE_LEN = 200
 
@@ -198,6 +200,8 @@ class PathwayFitnessTracker:
             count=1,
             recent_inputs=[truncated],
         ))
+        if len(rec.input_failure_clusters) > MAX_INPUT_CLUSTERS:
+            rec.input_failure_clusters = rec.input_failure_clusters[-MAX_INPUT_CLUSTERS:]
 
     def compute_fitness(self, pathway_name: str) -> float:
         """Windowed success rate with exponential recency weighting."""
@@ -265,7 +269,8 @@ class PathwayFitnessTracker:
 
     def save(self, path: Path) -> None:
         data = {name: rec.to_dict() for name, rec in self.records.items()}
-        path.write_text(json.dumps(data, indent=2))
+        with file_lock(path):
+            path.write_text(json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         if path.exists():

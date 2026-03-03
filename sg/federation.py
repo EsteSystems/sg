@@ -97,6 +97,9 @@ def import_allele(registry: Registry, data: dict) -> str:
     return sha
 
 
+MAX_PEER_OBSERVATIONS = 50
+
+
 def merge_peer_observation(allele: AlleleMetadata, peer_name: str, data: dict) -> None:
     """Merge a peer's fitness observation into the allele.
 
@@ -109,6 +112,8 @@ def merge_peer_observation(allele: AlleleMetadata, peer_name: str, data: dict) -
         "failures": max(0, data.get("total_invocations", 0) - data.get("successful_invocations", 0)),
         "timestamp": _time.time(),
     })
+    if len(allele.peer_observations) > MAX_PEER_OBSERVATIONS:
+        allele.peer_observations = allele.peer_observations[-MAX_PEER_OBSERVATIONS:]
 
 
 def push_allele(peer: PeerConfig, allele_data: dict) -> bool:

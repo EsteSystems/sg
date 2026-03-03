@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sg.filelock import file_lock
 from sg.log import get_logger
 
 logger = get_logger("decomposition")
@@ -198,7 +199,8 @@ class DecompositionDetector:
             "decomposition_state": self._decomposition_state,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2))
+        with file_lock(path):
+            path.write_text(json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         if path.exists():

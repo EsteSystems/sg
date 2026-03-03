@@ -4,6 +4,11 @@ Records significant evolutionary events: promotions, demotions, mutations,
 regressions, and pathway completions. Each entry is a single JSON line
 with a timestamp, event type, locus/sha context, and free-form details.
 
+Known limitation: no log rotation. The audit log grows without bound.
+For long-running deployments, external log rotation (e.g. logrotate) is
+recommended. read_recent() scans the full file, so very large logs will
+have O(n) read cost.
+
 Usage::
 
     from sg.audit import AuditLog

@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+from sg.filelock import file_lock
 from sg.kernel.base import Kernel
 from sg.loader import load_gene, call_gene
 from sg.log import get_logger
@@ -81,7 +82,8 @@ class FusionTracker:
 
     def save(self, path: Path) -> None:
         data = {name: track.to_dict() for name, track in self.tracks.items()}
-        path.write_text(json.dumps(data, indent=2))
+        with file_lock(path):
+            path.write_text(json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         if path.exists():

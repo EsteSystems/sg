@@ -10,6 +10,7 @@ from pathlib import Path
 
 from sg import arena
 from sg.audit import AuditLog
+from sg.filelock import file_lock
 from sg.log import get_logger, correlation_scope
 
 logger = get_logger("orchestrator")
@@ -866,33 +867,40 @@ class Orchestrator:
         if not self._is_structural_problem(pathway_name):
             return None
 
-        ctx = self._build_pathway_mutation_context(pathway_name)
-        if ctx is None:
-            return None
+        try:
+            ctx = self._build_pathway_mutation_context(pathway_name)
+            if ctx is None:
+                return None
 
-        from sg.pathway_mutation import select_operator, default_operators
-        operators = default_operators(mutation_engine=self.mutation_engine)
-        result = select_operator(ctx, operators)
-        if result is None:
-            return None
+            from sg.pathway_mutation import select_operator, default_operators
+            operators = default_operators(mutation_engine=self.mutation_engine)
+            result = select_operator(ctx, operators)
+            if result is None:
+                return None
 
-        dominant_sha = self.phenotype.get_pathway_dominant(pathway_name)
-        new_sha = self.pathway_registry.register(
-            pathway_name, result.new_steps,
-            parent_sha=dominant_sha,
-            mutation_operator=result.operator_name,
-        )
-        self.phenotype.add_pathway_fallback(pathway_name, new_sha)
-        self._pathway_mutation_throttle.record_mutation(pathway_name)
-        self._audit("pathway_mutation", locus=pathway_name, sha=new_sha,
-                    operator=result.operator_name, rationale=result.rationale)
-        logger.info(
-            "registered pathway mutation for '%s': %s (operator: %s)",
-            pathway_name, new_sha[:12], result.operator_name,
-            extra={"pathway": pathway_name, "sha": new_sha[:12],
-                   "event": "pathway_mutation"},
-        )
-        return new_sha
+            dominant_sha = self.phenotype.get_pathway_dominant(pathway_name)
+            new_sha = self.pathway_registry.register(
+                pathway_name, result.new_steps,
+                parent_sha=dominant_sha,
+                mutation_operator=result.operator_name,
+            )
+            self.phenotype.add_pathway_fallback(pathway_name, new_sha)
+            self._pathway_mutation_throttle.record_mutation(pathway_name)
+            self._audit("pathway_mutation", locus=pathway_name, sha=new_sha,
+                        operator=result.operator_name, rationale=result.rationale)
+            logger.info(
+                "registered pathway mutation for '%s': %s (operator: %s)",
+                pathway_name, new_sha[:12], result.operator_name,
+                extra={"pathway": pathway_name, "sha": new_sha[:12],
+                       "event": "pathway_mutation"},
+            )
+            return new_sha
+        except Exception:
+            logger.warning(
+                "pathway mutation failed for '%s', skipping",
+                pathway_name, exc_info=True,
+            )
+            return None
 
     def _is_structural_problem(self, pathway_name: str) -> bool:
         """Detect structural problem: gene fitness high but pathway fitness low."""
@@ -1004,7 +1012,8 @@ class Orchestrator:
         if self.pathway_registry is not None:
             self.pathway_registry.save_index()
         throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
-        throttle_path.write_text(json.dumps(
-            self._pathway_mutation_throttle.to_dict(), indent=2,
-        ))
+        with file_lock(throttle_path):
+            throttle_path.write_text(json.dumps(
+                self._pathway_mutation_throttle.to_dict(), indent=2,
+            ))
         self.decomposition_detector.save(self._decomposition_path)

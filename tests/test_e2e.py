@@ -91,7 +91,12 @@ def execute(input_json):
 
 
 def make_orchestrator(project_root: Path) -> Orchestrator:
+    from sg.parser.types import GeneFamily
     contract_store = ContractStore.open(project_root / "contracts")
+    for locus in contract_store.known_loci():
+        gc = contract_store.get_gene(locus)
+        if gc and gc.family == GeneFamily.CONFIGURATION and gc.verify_within:
+            gc.verify_within = "0.01s"
     registry = Registry.open(project_root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(project_root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(project_root / "fusion_tracker.json")
@@ -118,8 +123,15 @@ INPUT_JSON = json.dumps({
 
 
 class TestHappyPath:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_single_pathway_execution(self, project):
         orch = make_orchestrator(project)
+        self._orch = orch
         outputs = orch.run_pathway("configure_bridge_with_stp", INPUT_JSON)
         orch.save_state()
 
@@ -132,8 +144,15 @@ class TestHappyPath:
 
 
 class TestFailureAndMutation:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_injected_failure_triggers_mutation(self, project):
         orch = make_orchestrator(project)
+        self._orch = orch
         orch.kernel.inject_failure("create_bridge", "simulated kernel panic")
 
         outputs = orch.run_pathway("configure_bridge_with_stp", INPUT_JSON)
@@ -144,9 +163,16 @@ class TestFailureAndMutation:
 
 
 class TestFusion:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_fusion_triggers_after_threshold(self, project):
         for i in range(FUSION_THRESHOLD + 1):
             orch = make_orchestrator(project)
+            self._orch = orch
 
             input_data = json.loads(INPUT_JSON)
             input_data["bridge_name"] = f"br{i}"
@@ -163,6 +189,7 @@ class TestFusion:
         assert fusion_config.fused_sha is not None
 
         orch = make_orchestrator(project)
+        self._orch = orch
         input_data = json.loads(INPUT_JSON)
         input_data["bridge_name"] = "br_fused"
         outputs = orch.run_pathway("configure_bridge_with_stp", json.dumps(input_data))
@@ -174,8 +201,15 @@ class TestFusion:
 
 
 class TestStatus:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_allele_tracking(self, project):
         orch = make_orchestrator(project)
+        self._orch = orch
         orch.run_pathway("configure_bridge_with_stp", INPUT_JSON)
         orch.save_state()
 

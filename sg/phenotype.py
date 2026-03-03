@@ -9,7 +9,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_bytes, file_lock
+from sg.log import get_logger
+
+logger = get_logger("phenotype")
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -218,15 +221,19 @@ class PhenotypeMap:
                 entry["fallback"] = config.fallback
             data["topology_allele"][key] = entry
         with file_lock(path):
-            path.write_bytes(tomli_w.dumps(data).encode())
+            atomic_write_bytes(path, tomli_w.dumps(data).encode())
 
     @classmethod
     def load(cls, path: Path) -> PhenotypeMap:
         pm = cls()
         if not path.exists():
             return pm
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception:
+            logger.warning("phenotype map corrupted at %s, starting fresh", path)
+            return pm
         for key, entry in data.get("locus", {}).items():
             pm.loci[key] = LocusConfig(
                 dominant=entry.get("dominant"),

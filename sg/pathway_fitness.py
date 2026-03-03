@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
 from sg.log import get_logger
 
 logger = get_logger("pathway_fitness")
@@ -270,11 +270,15 @@ class PathwayFitnessTracker:
     def save(self, path: Path) -> None:
         data = {name: rec.to_dict() for name, rec in self.records.items()}
         with file_lock(path):
-            path.write_text(json.dumps(data, indent=2))
+            atomic_write_text(path, json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         if path.exists():
-            data = json.loads(path.read_text())
+            try:
+                data = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                logger.warning("pathway fitness data corrupted at %s, starting fresh", path)
+                return
             self.records = {
                 name: PathwayFitnessRecord.from_dict(rec)
                 for name, rec in data.items()

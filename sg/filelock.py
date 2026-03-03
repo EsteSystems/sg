@@ -19,8 +19,27 @@ from pathlib import Path
 from typing import Generator
 
 
+from sg.log import get_logger
+
+logger = get_logger("filelock")
+
+
 class FileLockTimeout(Exception):
     """Raised when a file lock cannot be acquired within the timeout."""
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write content to path atomically via temp file + rename."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(content)
+    os.replace(str(tmp), str(path))
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Write bytes to path atomically via temp file + rename."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(content)
+    os.replace(str(tmp), str(path))
 
 
 @contextmanager

@@ -57,7 +57,12 @@ def project(tmp_path):
 
 
 def make_orch(project_root: Path) -> Orchestrator:
+    from sg.parser.types import GeneFamily
     contract_store = ContractStore.open(project_root / "contracts")
+    for locus in contract_store.known_loci():
+        gc = contract_store.get_gene(locus)
+        if gc and gc.family == GeneFamily.CONFIGURATION and gc.verify_within:
+            gc.verify_within = "0.01s"
     registry = Registry.open(project_root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(project_root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(project_root / "fusion_tracker.json")
@@ -86,9 +91,16 @@ PROVISION_INPUT = json.dumps({
 class TestMACFlappingE2E:
     """Full MAC flapping scenario — the canonical Software Genomics demo."""
 
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_provision_then_healthy_check(self, project):
         """Phase 1: Provision bridge, verify health check passes."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Provision
         outputs = orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
@@ -110,6 +122,7 @@ class TestMACFlappingE2E:
     def test_mac_flapping_detection(self, project):
         """Phase 2: Inject MAC flapping, verify diagnostic detects it."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Provision
         orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
@@ -132,6 +145,7 @@ class TestMACFlappingE2E:
     def test_fitness_decay_after_unhealthy_diagnostic(self, project):
         """Phase 3: Unhealthy diagnostics reduce config gene fitness."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Provision
         orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
@@ -163,6 +177,7 @@ class TestMACFlappingE2E:
     def test_convergence_records_persist_across_sessions(self, project):
         """Phase 4: Fitness records survive save/load cycle."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Provision + healthy check
         orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
@@ -189,6 +204,7 @@ class TestMACFlappingE2E:
     def test_remediation_pathway_triggers_on_flapping(self, project):
         """Phase 5: remediate_mac_flapping detects and remediates."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Provision
         orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
@@ -215,6 +231,7 @@ class TestMACFlappingE2E:
     def test_link_failure_detection(self, project):
         """Link failure detected by check_connectivity diagnostic."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Provision
         orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
@@ -235,9 +252,16 @@ class TestMACFlappingE2E:
 class TestDeployServerNetwork:
     """Tests for the composed deploy_server_network pathway."""
 
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_full_server_deployment(self, project):
         """Deploy bridge + bond + VLANs in a single pathway."""
         orch = make_orch(project)
+        self._orch = orch
 
         outputs = orch.run_pathway("deploy_server_network", json.dumps({
             "bridge_name": "br0",
@@ -260,6 +284,7 @@ class TestDeployServerNetwork:
     def test_deployment_with_health_check(self, project):
         """Deploy then health check — end-to-end."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Deploy
         orch.run_pathway("deploy_server_network", json.dumps({
@@ -285,9 +310,16 @@ class TestDeployServerNetwork:
 class TestEvolutionaryLoop:
     """Tests demonstrating the full evolutionary loop."""
 
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_mutation_on_failure_then_recovery(self, project):
         """Gene failure → mutation → fix → successful execution."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Register a gene that always raises (doesn't catch errors)
         bad_gene = (
@@ -317,6 +349,7 @@ class TestEvolutionaryLoop:
     def test_fitness_tracks_across_invocations(self, project):
         """Multiple invocations build up fitness tracking."""
         orch = make_orch(project)
+        self._orch = orch
 
         for i in range(5):
             orch.execute_locus("bridge_create", json.dumps({
@@ -332,6 +365,7 @@ class TestEvolutionaryLoop:
     def test_demotion_on_consecutive_failures(self, project):
         """Three consecutive failures demote an allele."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Register a gene that always fails
         bad_gene = (
@@ -357,6 +391,7 @@ class TestEvolutionaryLoop:
     def test_two_family_feedback_loop(self, project):
         """Diagnostic genes feed fitness back to config genes."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Provision
         orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
@@ -383,6 +418,7 @@ class TestEvolutionaryLoop:
     def test_safety_rollback_on_gene_failure(self, project):
         """Gene failure rolls back partial kernel state."""
         orch = make_orch(project)
+        self._orch = orch
 
         # Register gene that creates state then raises
         bad_gene = (

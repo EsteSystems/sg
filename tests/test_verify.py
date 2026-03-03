@@ -133,6 +133,7 @@ class TestVerifyScheduling:
     def test_verify_fires_after_config_gene(self, project):
         """Config gene success schedules and fires verify diagnostic."""
         orch = self._make_orch(project)
+        self._orch = orch
 
         # Run bridge_create — its contract has verify: check_connectivity
         orch.execute_locus("bridge_create", json.dumps({
@@ -154,6 +155,7 @@ class TestVerifyScheduling:
     def test_verify_feeds_convergence_fitness(self, project):
         """Full chain: config success → verify fires → feeds → convergence fitness record."""
         orch = self._make_orch(project)
+        self._orch = orch
 
         # Run bridge_create
         orch.execute_locus("bridge_create", json.dumps({
@@ -175,6 +177,7 @@ class TestVerifyScheduling:
     def test_verify_skipped_for_diagnostic_genes(self, project):
         """Diagnostic gene success does NOT schedule verify diagnostics."""
         orch = self._make_orch(project)
+        self._orch = orch
 
         # Create a bridge so check_connectivity has something to check
         orch.kernel.create_bridge("br0", ["eth0"])
@@ -192,6 +195,7 @@ class TestVerifyScheduling:
     def test_verify_with_delay(self, project):
         """Verify diagnostic respects the within delay."""
         orch = self._make_orch(project)
+        self._orch = orch
 
         # Patch bridge_stp's verify_within to a small but measurable delay
         gene_contract = orch.contract_store.get_gene("bridge_stp")

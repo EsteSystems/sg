@@ -9,10 +9,13 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
+from sg.log import get_logger
 
 from sg.registry import AlleleMetadata
 from sg import arena
+
+logger = get_logger("regression")
 
 
 REGRESSION_THRESHOLD = 0.2   # fitness drop from peak → proactive mutation
@@ -82,12 +85,16 @@ class RegressionDetector:
         """Persist regression history to JSON."""
         data = {sha: h.to_dict() for sha, h in self.history.items()}
         with file_lock(path):
-            path.write_text(json.dumps(data, indent=2))
+            atomic_write_text(path, json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         """Load regression history from JSON."""
         if path.exists():
-            data = json.loads(path.read_text())
+            try:
+                data = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                logger.warning("regression history corrupted at %s, starting fresh", path)
+                return
             self.history = {
                 sha: FitnessHistory.from_dict(h)
                 for sha, h in data.items()

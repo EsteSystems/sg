@@ -73,6 +73,7 @@ class TestFeedbackTimescaleOverride:
     def test_default_timescale_is_convergence(self, project):
         """Without override, feedback uses contract's declared timescale."""
         orch = self._make_orch(project)
+        self._orch = orch
         assert orch.feedback_timescale is None
 
         # Provision bridge, then run health check
@@ -95,6 +96,7 @@ class TestFeedbackTimescaleOverride:
     def test_resilience_override(self, project):
         """With feedback_timescale='resilience', all feedback goes to resilience."""
         orch = self._make_orch(project)
+        self._orch = orch
         orch.feedback_timescale = "resilience"
 
         # Provision bridge, then run health check
@@ -117,6 +119,7 @@ class TestFeedbackTimescaleOverride:
     def test_resilience_failure_reduces_fitness(self, project):
         """Resilience failure lowers overall fitness."""
         orch = self._make_orch(project)
+        self._orch = orch
         orch.feedback_timescale = "resilience"
 
         # Provision bridge
@@ -141,6 +144,7 @@ class TestFeedbackTimescaleOverride:
     def test_multiple_watch_iterations(self, project):
         """Simulates what sg watch does: multiple diagnostic runs accumulate resilience records."""
         orch = self._make_orch(project)
+        self._orch = orch
         orch.feedback_timescale = "resilience"
 
         # Provision

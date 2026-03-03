@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
 from sg.log import get_logger
 
 logger = get_logger("decomposition")
@@ -200,11 +200,15 @@ class DecompositionDetector:
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(path):
-            path.write_text(json.dumps(data, indent=2))
+            atomic_write_text(path, json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         if path.exists():
-            data = json.loads(path.read_text())
+            try:
+                data = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                logger.warning("decomposition data corrupted at %s, starting fresh", path)
+                return
             self.histories = {
                 locus: LocusErrorHistory.from_dict(h)
                 for locus, h in data.get("histories", {}).items()

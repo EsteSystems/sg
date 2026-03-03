@@ -48,7 +48,12 @@ def project(tmp_path):
 
 
 def _make_orch(project_root):
+    from sg.parser.types import GeneFamily
     contract_store = ContractStore.open(project_root / "contracts")
+    for locus in contract_store.known_loci():
+        gc = contract_store.get_gene(locus)
+        if gc and gc.family == GeneFamily.CONFIGURATION and gc.verify_within:
+            gc.verify_within = "0.01s"
     registry = Registry.open(project_root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(project_root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(project_root / "fusion_tracker.json")
@@ -68,9 +73,16 @@ def _make_orch(project_root):
 # --- Topology verify scheduling ---
 
 class TestTopologyVerifyScheduling:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_topology_schedules_verify(self, project):
         """execute_topology schedules verify diagnostics from topology contract."""
         orch = _make_orch(project)
+        self._orch = orch
 
         topo = TopologyContract(
             name="test_verify",
@@ -98,6 +110,7 @@ class TestTopologyVerifyScheduling:
         still fire, so we check that topology adds nothing beyond that.
         """
         orch = _make_orch(project)
+        self._orch = orch
 
         # Run a bare gene to see how many gene-level verifies fire
         orch.execute_locus("bridge_create", json.dumps({
@@ -108,6 +121,7 @@ class TestTopologyVerifyScheduling:
 
         # Now run topology without verify — should add no extra verifies
         orch2 = _make_orch(project)
+        self._orch = orch2
         topo = TopologyContract(
             name="test_no_verify",
             does="test topology without verify",
@@ -127,6 +141,7 @@ class TestTopologyVerifyScheduling:
     def test_production_server_schedules_verify(self, project):
         """Full production_server topology schedules its verify steps."""
         orch = _make_orch(project)
+        self._orch = orch
 
         outputs = orch.run_topology("production_server", json.dumps({
             "bridge_name": "br0",
@@ -144,6 +159,7 @@ class TestTopologyVerifyScheduling:
     def test_verify_not_scheduled_on_failure(self, project):
         """Verify is NOT scheduled when topology fails."""
         orch = _make_orch(project)
+        self._orch = orch
 
         # Remove bond_create allele and fixture to force failure
         orch.phenotype.loci.pop("bond_create", None)
@@ -179,9 +195,16 @@ class TestTopologyVerifyScheduling:
 # --- Lineage visualization ---
 
 class TestLineage:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_lineage_single_allele(self, project):
         """Single allele shows as root with no children."""
         orch = _make_orch(project)
+        self._orch = orch
         alleles = orch.registry.alleles_for_locus("bridge_create")
         assert len(alleles) >= 1
         # Root allele has no parent

@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
 from sg.log import get_logger
 
 logger = get_logger("meta_params")
@@ -215,12 +215,16 @@ class MetaParamTracker:
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(path):
-            path.write_text(json.dumps(data, indent=2))
+            atomic_write_text(path, json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         if not path.exists():
             return
-        data = json.loads(path.read_text())
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            logger.warning("meta params data corrupted at %s, starting fresh", path)
+            return
         if "defaults" in data:
             self.defaults = EvolutionaryParams.from_dict(data["defaults"])
         self.overrides = data.get("overrides", {})

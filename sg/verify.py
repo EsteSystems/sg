@@ -115,11 +115,14 @@ class VerifyScheduler:
             self._timers.clear()
 
     def cancel_all(self) -> None:
-        """Cancel all pending timers and clear the list."""
+        """Cancel all pending timers, join threads, and clear the list."""
         with self._lock:
-            for timer in self._timers:
+            timers = list(self._timers)
+            for timer in timers:
                 timer.cancel()
             self._timers.clear()
+        for timer in timers:
+            timer.join(timeout=2.0)
 
     @property
     def pending_count(self) -> int:

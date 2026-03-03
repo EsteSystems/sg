@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sg.decomposition import _normalize_error
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
 from sg.log import get_logger
 
 logger = get_logger("failure_discovery")
@@ -232,12 +232,16 @@ class FailureDiscovery:
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(path):
-            path.write_text(json.dumps(data, indent=2))
+            atomic_write_text(path, json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         if not path.exists():
             return
-        data = json.loads(path.read_text())
+        try:
+            data = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            logger.warning("failure discovery data corrupted at %s, starting fresh", path)
+            return
         self.patterns = {
             locus: {
                 p: NovelErrorPattern.from_dict(e)

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from sg import arena
 from sg.audit import AuditLog
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
 from sg.log import get_logger, correlation_scope
 
 logger = get_logger("orchestrator")
@@ -967,8 +967,12 @@ class Orchestrator:
         """Load pathway mutation throttle from disk or create fresh."""
         throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
         if throttle_path.exists():
-            data = json.loads(throttle_path.read_text())
-            throttle = PathwayMutationThrottle.from_dict(data)
+            try:
+                data = json.loads(throttle_path.read_text())
+                throttle = PathwayMutationThrottle.from_dict(data)
+            except json.JSONDecodeError:
+                logger.warning("pathway mutation throttle corrupted, starting fresh")
+                throttle = PathwayMutationThrottle()
         else:
             throttle = PathwayMutationThrottle()
         cooldown_env = os.environ.get("SG_PATHWAY_MUTATION_COOLDOWN")
@@ -1254,7 +1258,7 @@ class Orchestrator:
             self.pathway_registry.save_index()
         throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
         with file_lock(throttle_path):
-            throttle_path.write_text(json.dumps(
+            atomic_write_text(throttle_path, json.dumps(
                 self._pathway_mutation_throttle.to_dict(), indent=2,
             ))
         self.decomposition_detector.save(self._decomposition_path)

@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
 from sg.log import get_logger
 
 logger = get_logger("pathway_registry")
@@ -225,7 +225,7 @@ class PathwayRegistry:
         self.ensure_dirs()
         data = {sha: a.to_dict() for sha, a in self.alleles.items()}
         with file_lock(self.index_path):
-            self.index_path.write_text(json.dumps(data, indent=2))
+            atomic_write_text(self.index_path, json.dumps(data, indent=2))
 
     def load_index(self) -> None:
         if self.index_path.exists():

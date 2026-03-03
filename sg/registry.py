@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 
-from sg.filelock import file_lock
+from sg.filelock import atomic_write_text, file_lock
 from sg.log import get_logger
 
 logger = get_logger("registry")
@@ -110,7 +110,7 @@ class Registry:
     def save_index(self) -> None:
         data = {sha: meta.to_dict() for sha, meta in self.alleles.items()}
         with file_lock(self.index_path):
-            self.index_path.write_text(json.dumps(data, indent=2))
+            atomic_write_text(self.index_path, json.dumps(data, indent=2))
 
     def _rebuild_locus_index(self) -> None:
         """Rebuild the locus index from current alleles dict."""

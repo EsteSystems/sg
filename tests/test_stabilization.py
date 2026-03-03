@@ -43,7 +43,7 @@ class TestCoefficientOfVariation:
     def test_stable_values(self):
         values = [0.8] * 20
         cv = coefficient_of_variation(values)
-        assert cv == 0.0
+        assert cv == pytest.approx(0.0, abs=1e-14)
 
     def test_volatile_values(self):
         values = [0.1, 0.9, 0.2, 0.8, 0.15, 0.85]

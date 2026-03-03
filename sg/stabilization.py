@@ -21,6 +21,8 @@ logger = get_logger("stabilization")
 CV_THRESHOLD = 0.05
 STABILIZATION_TIMEOUT_HOURS = 24
 MIN_OBSERVATIONS = 10
+MAX_STABILIZATION_STATES = 50
+MAX_FITNESS_SNAPSHOTS = 200
 
 
 def coefficient_of_variation(values: list[float]) -> float:
@@ -76,6 +78,16 @@ class StabilizationTracker:
         self, pathway_name: str, structure_sha: str, loci: list[str],
     ) -> None:
         """Begin tracking stabilization after a pathway promotion."""
+        if len(self.states) >= MAX_STABILIZATION_STATES:
+            # Prune completed/timed_out entries first
+            pruneable = [k for k, v in self.states.items()
+                         if v.stabilized or v.timed_out]
+            if pruneable:
+                del self.states[pruneable[0]]
+            else:
+                oldest = min(self.states,
+                             key=lambda k: self.states[k].started_at)
+                del self.states[oldest]
         self.states[pathway_name] = StabilizationState(
             pathway_name=pathway_name,
             promoted_structure_sha=structure_sha,
@@ -99,6 +111,10 @@ class StabilizationTracker:
             return
         if locus in state.gene_fitness_snapshots:
             state.gene_fitness_snapshots[locus].append(fitness)
+            if len(state.gene_fitness_snapshots[locus]) > MAX_FITNESS_SNAPSHOTS:
+                state.gene_fitness_snapshots[locus] = (
+                    state.gene_fitness_snapshots[locus][-MAX_FITNESS_SNAPSHOTS:]
+                )
 
     def check_stabilization(self, pathway_name: str) -> str:
         """Check stabilization progress.

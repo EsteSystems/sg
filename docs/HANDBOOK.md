@@ -54,19 +54,38 @@ sg/                               # core engine (domain-agnostic)
 ├── registry.py                   # SHA-256 content-addressed store
 ├── phenotype.py                  # TOML phenotype map
 ├── arena.py                      # fitness scoring, promotion/demotion
+├── fitness.py                    # temporal fitness (immediate/convergence/resilience)
 ├── loader.py                     # sandboxed gene loading
 ├── sandbox.py                    # exec() restrictions, timeout
 ├── mutation.py                   # mock + LLM mutation engines
-├── pathway.py                    # pathway execution (fusion-aware)
-├── fusion.py                     # reinforcement tracking
+├── mutation_cache.py             # LRU cache for mutation responses
 ├── contracts.py                  # contract loading, validation
 ├── conformance.py                # contract conformance testing
 ├── safety.py                     # transactions, blast radius
+├── pathway.py                    # pathway execution (fusion-aware)
+├── pathway_fitness.py            # per-pathway timing and failure tracking
+├── pathway_mutation.py           # structural mutation operators (reorder, delete, substitute, insert)
+├── pathway_registry.py           # pathway allele CAS (structure SHA)
+├── pathway_arena.py              # pathway promotion/demotion
+├── topology.py                   # topology deployment and planning
+├── topology_registry.py          # topology allele registry
+├── topology_arena.py             # topology promotion/demotion
+├── fusion.py                     # reinforcement tracking, fuse/decompose
+├── decomposition.py              # error diversity → auto-decomposition
+├── interactions.py               # cross-locus interaction detection
+├── probe.py                      # input-space edge-case probing
+├── stabilization.py              # post-promotion fitness stabilization
 ├── regression.py                 # fitness regression detection
+├── meta_params.py                # adaptive parameter tuning
+├── failure_discovery.py          # failure mode cataloging
 ├── federation.py                 # multi-organism allele sharing
+├── pool.py                       # gene pool client (push/pull/auto)
+├── pool_server.py                # gene pool HTTP server
+├── verify.py                     # diagnostic verification scheduling
 ├── scaffold.py                   # plugin scaffolding (sg new-plugin)
 ├── log.py                        # structured logging
-├── audit.py                      # audit trail
+├── audit.py                      # append-only audit trail (JSONL)
+├── filelock.py                   # file-based locking (shared/exclusive)
 ├── dashboard.py                  # web dashboard (FastAPI)
 ├── snapshot.py                   # genome snapshots/rollback
 ├── diff.py                       # phenotype diffing
@@ -495,6 +514,29 @@ An allele is demoted after **3 consecutive failures**. It moves from dominant to
 | OpenAI | `--mutation-engine openai` | `OPENAI_API_KEY` |
 | DeepSeek | `--mutation-engine deepseek` | `DEEPSEEK_API_KEY` |
 | Auto | `--mutation-engine auto` | Tries Claude → OpenAI → DeepSeek → Mock |
+
+### Batch Mutation
+
+When a gene fails, the orchestrator can generate multiple diverse mutations in one shot:
+
+```python
+mutations = engine.mutate_batch(ctx, count=3)
+```
+
+The base `MutationEngine` calls `mutate()` N times, tolerating individual failures. LLM engines (Claude, OpenAI, DeepSeek) override this to generate all variants in a single API call, using `---VARIANT---` as a separator. Each variant must use a fundamentally different strategy to handle the failure. The mock engine returns a single fixture.
+
+### Enriched Mutation Context
+
+The `MutationContext` passed to mutation engines includes additional fields beyond the failing source and error:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kernel_state` | `str?` | Current kernel state snapshot (what resources exist) |
+| `prior_mutations` | `list[str]` | Sources of previous failed mutations at this locus |
+| `pathway_context` | `str?` | Pathway contract text when the gene failed during a pathway |
+| `sibling_summaries` | `list[str]` | Summaries of other genes in the same pathway |
+
+These fields give the mutation engine richer context to avoid repeating failed strategies and to understand the gene's role in its pathway.
 
 ### Proactive Generation
 

@@ -18,6 +18,8 @@ from sg.log import get_logger
 
 logger = get_logger("topology_registry")
 
+MAX_ALLELES_PER_TOPOLOGY = 20
+
 
 @dataclass
 class TopologyStepSpec:
@@ -162,7 +164,24 @@ class TopologyRegistry:
             self._topology_index.setdefault(topology_name, [])
             if sha not in self._topology_index[topology_name]:
                 self._topology_index[topology_name].append(sha)
+            self._evict_if_over_cap(topology_name)
         return sha
+
+    def _evict_if_over_cap(self, topology_name: str) -> None:
+        """Evict oldest deprecated allele if topology exceeds cap."""
+        shas = self._topology_index.get(topology_name, [])
+        if len(shas) <= MAX_ALLELES_PER_TOPOLOGY:
+            return
+        deprecated = [s for s in shas if s in self.alleles
+                      and self.alleles[s].state == "deprecated"]
+        if deprecated:
+            victim = min(deprecated,
+                         key=lambda s: self.alleles[s].created_at)
+        else:
+            victim = min(shas, key=lambda s: self.alleles[s].created_at
+                         if s in self.alleles else 0)
+        shas.remove(victim)
+        self.alleles.pop(victim, None)
 
     def get(self, sha: str) -> TopologyAllele | None:
         return self.alleles.get(sha)

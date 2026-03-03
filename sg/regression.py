@@ -6,7 +6,8 @@ below peak, triggers proactive mutation (generates a competing allele).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+import time
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from sg.filelock import atomic_write_text, file_lock, file_lock_shared
@@ -21,6 +22,7 @@ logger = get_logger("regression")
 REGRESSION_THRESHOLD = 0.2   # fitness drop from peak → proactive mutation
 SEVERE_REGRESSION = 0.4      # fitness drop from peak → auto-demote
 MIN_INVOCATIONS = 10         # need data before detecting regression
+MAX_REGRESSION_ENTRIES = 500
 
 
 @dataclass
@@ -29,6 +31,7 @@ class FitnessHistory:
     peak_fitness: float = 0.0
     last_fitness: float = 0.0
     samples: int = 0
+    last_updated: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -63,6 +66,12 @@ class RegressionDetector:
         h = self.history[sha]
         h.last_fitness = fitness
         h.samples += 1
+        h.last_updated = time.time()
+
+        if len(self.history) > MAX_REGRESSION_ENTRIES:
+            oldest = min(self.history,
+                         key=lambda k: self.history[k].last_updated)
+            del self.history[oldest]
 
         if fitness > h.peak_fitness:
             h.peak_fitness = fitness

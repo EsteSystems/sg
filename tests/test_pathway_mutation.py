@@ -758,3 +758,164 @@ class TestOrchestratorIntegration:
         assert throttle_path.exists()
         data = json.loads(throttle_path.read_text())
         assert "test_pw" in data["last_mutation"]
+
+
+# --- Edge-case tests for untested paths ---
+
+
+class TestThrottleCooldownExpiry:
+    def test_can_mutate_after_cooldown(self):
+        """After cooldown elapses, pathway is mutable again."""
+        throttle = PathwayMutationThrottle(cooldown_seconds=1.0)
+        throttle.record_mutation("pw")
+        assert not throttle.can_mutate("pw")
+        # Manually set last mutation far in the past
+        throttle._last_mutation["pw"] = time.time() - 10.0
+        assert throttle.can_mutate("pw")
+
+
+class TestReindexConditionalEqualsRemoved:
+    def test_condition_index_equals_removed(self):
+        """When condition_step_index == removed_idx, index is unchanged (not decremented)."""
+        steps = [
+            StepSpec(
+                step_type="conditional", target="",
+                condition_step_index=2, condition_field="f",
+                branches={},
+            ),
+        ]
+        # Removing index 2 — the conditional references index 2 exactly
+        result = _reindex_conditionals_after_delete(steps, 2)
+        # condition_step_index == removed_idx: not > removed_idx, so unchanged
+        assert result[0].condition_step_index == 2
+
+
+class TestAllAdjacentPairsConstrained:
+    def test_returns_none_when_all_pairs_constrained(self):
+        """When all adjacent pairs have dependency constraints, reorder returns None."""
+        from sg.parser.types import PathwayContract, Dependency, BlastRadius
+        op = ReorderingOperator()
+        steps = [
+            StepSpec(step_type="locus", target="a"),
+            StepSpec(step_type="locus", target="b"),
+            StepSpec(step_type="locus", target="c"),
+        ]
+        # Each step depends on the previous (1-based indices)
+        contract = PathwayContract(
+            name="test_pw", risk=BlastRadius.LOW, does="test",
+            requires=[Dependency(step=2, needs=1), Dependency(step=3, needs=2)],
+        )
+        anomalies = [TimingAnomaly(step_name="c", latest_ms=100, avg_ms=10, ratio=10.0)]
+        ctx = _make_ctx(steps=steps, timing_anomalies=anomalies, contract=contract)
+        result = op.apply(ctx)
+        assert result is None
+
+
+class TestSelectOperatorFallthrough:
+    def test_can_apply_true_but_apply_returns_none(self):
+        """Operator says can_apply=True but apply() returns None → tries next."""
+
+        class FalsePositiveOp(PathwayMutationOperator):
+            @property
+            def name(self):
+                return "false_positive"
+
+            def can_apply(self, ctx):
+                return True
+
+            def apply(self, ctx):
+                return None
+
+        class FallbackOp(PathwayMutationOperator):
+            @property
+            def name(self):
+                return "fallback"
+
+            def can_apply(self, ctx):
+                return True
+
+            def apply(self, ctx):
+                return PathwayMutationResult(
+                    new_steps=ctx.current_steps,
+                    operator_name=self.name,
+                    rationale="fallback applied",
+                )
+
+        ctx = _make_ctx(steps=[StepSpec(step_type="locus", target="a")])
+        result = select_operator(ctx, [FalsePositiveOp(), FallbackOp()])
+        assert result is not None
+        assert result.operator_name == "fallback"
+
+
+class TestInsertionEdgeCases:
+    def test_engine_raises_returns_none(self, tmp_path):
+        """When the mutation engine raises an exception, apply() returns None."""
+        from sg.mutation import MutationEngine
+
+        class RaisingEngine(MutationEngine):
+            def __init__(self):
+                pass
+
+            def propose_pathway_insertion(self, **kwargs):
+                raise RuntimeError("engine failure")
+
+            def mutate(self, source, locus, context):
+                raise NotImplementedError
+
+        op = InsertionOperator(RaisingEngine())
+        steps = [
+            StepSpec(step_type="locus", target="a"),
+            StepSpec(step_type="locus", target="b"),
+        ]
+        ctx = _make_ctx(
+            steps=steps,
+            failure_distribution={"b": 0.6},
+            per_step_fitness={"b": 0.9},
+        )
+        result = op.apply(ctx)
+        assert result is None
+
+    def test_engine_returns_none_proposal(self, tmp_path):
+        """When the mutation engine returns None, apply() returns None."""
+        from sg.mutation import MutationEngine
+
+        class NoneEngine(MutationEngine):
+            def __init__(self):
+                pass
+
+            def propose_pathway_insertion(self, **kwargs):
+                return None
+
+            def mutate(self, source, locus, context):
+                raise NotImplementedError
+
+        op = InsertionOperator(NoneEngine())
+        steps = [
+            StepSpec(step_type="locus", target="a"),
+            StepSpec(step_type="locus", target="b"),
+        ]
+        ctx = _make_ctx(
+            steps=steps,
+            failure_distribution={"b": 0.6},
+            per_step_fitness={"b": 0.9},
+        )
+        result = op.apply(ctx)
+        assert result is None
+
+    def test_no_qualifying_step_returns_none(self):
+        """When no step meets the gap criteria, apply() returns None."""
+        from sg.mutation import MockMutationEngine
+
+        op = InsertionOperator(MockMutationEngine(Path("/tmp")))
+        # All steps are non-locus (loop), so no qualifying step found
+        steps = [
+            StepSpec(step_type="loop", target="body",
+                     loop_variable="item", loop_iterable="items"),
+        ]
+        ctx = _make_ctx(
+            steps=steps,
+            failure_distribution={"body": 0.6},
+            per_step_fitness={"body": 0.9},
+        )
+        result = op.apply(ctx)
+        assert result is None

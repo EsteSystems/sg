@@ -8,7 +8,7 @@ from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine
 from sg.orchestrator import Orchestrator
 from sg.phenotype import PhenotypeMap
-from sg.probe import generate_probes, probe_locus, ProbeReport, ProbeResult
+from sg.probe import generate_probes, probe_locus, _generate_valid, ProbeReport, ProbeResult
 from sg.parser.types import GeneContract, GeneFamily, BlastRadius, FieldDef
 from sg.registry import Registry
 
@@ -31,6 +31,14 @@ def execute(input_json):
     if not name:
         raise ValueError("name cannot be empty")
     return json.dumps({"success": True})
+'''
+
+BAD_OUTPUT_GENE = '''
+import json
+
+def execute(input_json):
+    # Returns output that doesn't match contract (wrong field names)
+    return json.dumps({"wrong_field": 42})
 '''
 
 
@@ -241,6 +249,59 @@ class TestProbeLocus:
         assert report.sha == sha[:12]
         assert report.total == len(report.results)
         assert report.passed + report.failed == report.total
+
+
+    def test_probe_source_missing(self, orch, project):
+        """Dominant allele exists but source file deleted raises ValueError."""
+        sha = project["registry"].register(ROBUST_GENE, "test_action")
+        project["phenotype"].promote("test_action", sha)
+        # Delete the source file
+        source_path = project["registry"].source_path(sha)
+        source_path.unlink()
+        with pytest.raises(ValueError, match="source not found"):
+            probe_locus("test_action", orch, count=1)
+
+    def test_probe_output_validation_fails(self, orch, project):
+        """Gene succeeds but output doesn't match contract schema."""
+        sha = project["registry"].register(BAD_OUTPUT_GENE, "test_action")
+        project["phenotype"].promote("test_action", sha)
+        report = probe_locus("test_action", orch, count=3)
+        assert report.failed > 0
+        validation_failures = [
+            r for r in report.results
+            if r.error == "output validation failed"
+        ]
+        assert len(validation_failures) > 0
+
+
+class TestGenerateValid:
+    def test_float_type(self):
+        fields = [FieldDef(name="rate", type="float")]
+        data = _generate_valid(fields)
+        assert data["rate"] == 1.0
+        assert isinstance(data["rate"], float)
+
+    def test_int_array_type(self):
+        fields = [FieldDef(name="ids", type="int[]")]
+        data = _generate_valid(fields)
+        assert data["ids"] == [1, 2]
+
+    def test_unknown_type_defaults_to_string(self):
+        fields = [FieldDef(name="x", type="custom_type")]
+        data = _generate_valid(fields)
+        assert data["x"] == "test-x"
+
+
+class TestGenerateProbesEdge:
+    def test_count_zero_returns_empty(self):
+        contract = GeneContract(
+            name="test", family=GeneFamily.CONFIGURATION,
+            risk=BlastRadius.NONE, does="test",
+            takes=[FieldDef(name="x", type="string")],
+            gives=[FieldDef(name="success", type="bool")],
+        )
+        probes = generate_probes(contract, count=0)
+        assert probes == []
 
 
 class TestProbeReport:

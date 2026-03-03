@@ -8,6 +8,7 @@ from sg.fusion import FusionTracker
 from sg_network import MockNetworkKernel
 from sg.interactions import (
     find_affected_pathways, check_interactions, InteractionFailure,
+    _generate_pathway_input,
 )
 from sg.mutation import MockMutationEngine, MutationEngine
 from sg.orchestrator import Orchestrator
@@ -378,3 +379,245 @@ class TestPromotionWithInteractions:
 
         # Should be promoted despite interaction failure
         assert phen.get_dominant("bridge_create") == sha_bad
+
+
+class TestGetPathwayNoneMidLoop:
+    def test_pathway_none_skipped_gracefully(self, orch_with_pathways, project_with_pathways):
+        """check_interactions skips when get_pathway returns None mid-loop."""
+        reg = project_with_pathways["registry"]
+        sha = reg.register(SIMPLE_GENE, "bridge_create")
+        # Patch get_pathway to return None for setup_bridge
+        store = project_with_pathways["contract_store"]
+        original = store.get_pathway
+        store.get_pathway = lambda name: None if name == "setup_bridge" else original(name)
+        try:
+            result = check_interactions("bridge_create", sha, orch_with_pathways)
+            assert result == []
+        finally:
+            store.get_pathway = original
+
+
+class TestConditionalStepTraversal:
+    def test_locus_found_in_conditional_branch(self, tmp_path):
+        """find_affected_pathways finds loci in conditional branches."""
+        genes_dir = tmp_path / "contracts" / "genes"
+        genes_dir.mkdir(parents=True)
+        pathways_dir = tmp_path / "contracts" / "pathways"
+        pathways_dir.mkdir(parents=True)
+
+        _write_sg(genes_dir / "check_status.sg", """\
+gene check_status
+  is diagnostic
+  risk none
+
+  does:
+    Check status.
+
+  takes:
+    name: string
+
+  gives:
+    status: string
+""")
+        _write_sg(genes_dir / "fix_a.sg", """\
+gene fix_a
+  is configuration
+  risk low
+
+  does:
+    Fix type A.
+
+  takes:
+    name: string
+
+  gives:
+    success: bool
+""")
+        _write_sg(pathways_dir / "conditional_pw.sg", """\
+pathway conditional_pw
+  risk low
+
+  does:
+    Conditional pathway.
+
+  takes:
+    name: string
+
+  steps:
+    1. check_status
+         name = {name}
+
+    2. when step 1.status:
+         "broken" -> fix_a
+           name = {name}
+
+  on failure:
+    rollback all
+""")
+
+        store = ContractStore()
+        store.load_directory(tmp_path / "contracts")
+
+        result = find_affected_pathways("fix_a", store)
+        assert "conditional_pw" in result
+
+
+class TestGeneratePathwayInput:
+    def test_float_and_int_array_types(self, tmp_path):
+        """_generate_pathway_input handles float, int[], and default types."""
+        from sg.parser.types import PathwayContract, FieldDef, BlastRadius
+
+        pw = PathwayContract(
+            name="test_pw",
+            risk=BlastRadius.LOW,
+            does="test",
+            takes=[
+                FieldDef(name="rate", type="float"),
+                FieldDef(name="ids", type="int[]"),
+                FieldDef(name="custom", type="unknown_type"),
+            ],
+            steps=[],
+        )
+        result = json.loads(_generate_pathway_input(pw))
+        assert result["rate"] == 1.0
+        assert result["ids"] == [1]
+        assert result["custom"] == "test-custom"
+
+
+class TestMultiplePathwaysMixed:
+    def test_mixed_pass_fail(self, tmp_path):
+        """check_interactions returns only failures when some pathways pass."""
+        genes_dir = tmp_path / "contracts" / "genes"
+        genes_dir.mkdir(parents=True)
+        pathways_dir = tmp_path / "contracts" / "pathways"
+        pathways_dir.mkdir(parents=True)
+        fixtures_dir = tmp_path / "fixtures"
+        fixtures_dir.mkdir()
+
+        _write_sg(genes_dir / "shared_gene.sg", """\
+gene shared_gene
+  is configuration
+  risk low
+
+  does:
+    A shared gene.
+
+  takes:
+    name: string
+
+  gives:
+    success: bool
+""")
+        _write_sg(genes_dir / "good_gene.sg", """\
+gene good_gene
+  is configuration
+  risk low
+
+  does:
+    Always works.
+
+  takes:
+    name: string
+
+  gives:
+    success: bool
+""")
+        _write_sg(genes_dir / "bad_gene.sg", """\
+gene bad_gene
+  is configuration
+  risk low
+
+  does:
+    Always fails.
+
+  takes:
+    name: string
+
+  gives:
+    success: bool
+""")
+        _write_sg(pathways_dir / "good_pw.sg", """\
+pathway good_pw
+  risk low
+
+  does:
+    Pathway that works.
+
+  takes:
+    name: string
+
+  steps:
+    1. shared_gene
+         name = {name}
+
+    2. good_gene
+         name = {name}
+
+  on failure:
+    rollback all
+""")
+        _write_sg(pathways_dir / "bad_pw.sg", """\
+pathway bad_pw
+  risk low
+
+  does:
+    Pathway that fails.
+
+  takes:
+    name: string
+
+  steps:
+    1. shared_gene
+         name = {name}
+
+    2. bad_gene
+         name = {name}
+
+  on failure:
+    rollback all
+""")
+
+        # Use a stateless gene that doesn't mutate kernel state,
+        # so sequential pathway runs don't interfere with each other.
+        NOOP_GENE = '''
+import json
+
+def execute(input_json):
+    data = json.loads(input_json)
+    return json.dumps({"success": True})
+'''
+        (fixtures_dir / "shared_gene_fix.py").write_text(NOOP_GENE)
+        (fixtures_dir / "good_gene_fix.py").write_text(NOOP_GENE)
+        (fixtures_dir / "bad_gene_fix.py").write_text(FAILING_GENE)
+
+        store = ContractStore()
+        store.load_directory(tmp_path / "contracts")
+
+        reg = Registry.open(tmp_path / ".sg" / "registry")
+        phen = PhenotypeMap()
+
+        for locus in ["shared_gene", "good_gene"]:
+            sha = reg.register(NOOP_GENE, locus)
+            phen.promote(locus, sha)
+            reg.get(sha).state = "dominant"
+
+        bad_sha = reg.register(FAILING_GENE, "bad_gene")
+        phen.promote("bad_gene", bad_sha)
+        reg.get(bad_sha).state = "dominant"
+
+        ft = FusionTracker()
+        kernel = MockNetworkKernel()
+        me = MockMutationEngine(fixtures_dir)
+
+        orch = Orchestrator(
+            registry=reg, phenotype=phen, mutation_engine=me,
+            fusion_tracker=ft, kernel=kernel, contract_store=store,
+            project_root=tmp_path,
+        )
+
+        new_sha = reg.register("# v2\n" + NOOP_GENE, "shared_gene")
+        failures = check_interactions("shared_gene", new_sha, orch)
+        # bad_pw should fail, good_pw should pass
+        failed_names = [f.pathway_name for f in failures]
+        assert "bad_pw" in failed_names
+        assert "good_pw" not in failed_names

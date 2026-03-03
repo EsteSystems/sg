@@ -14,7 +14,10 @@ from sg.decomposition import (
     LocusErrorHistory,
     _normalize_error,
     ERROR_WINDOW,
+    MAX_REPRESENTATIVE,
     MAX_SPLIT_COUNT,
+    MIN_CLUSTERS_FOR_SIGNAL,
+    MIN_ERRORS_FOR_SIGNAL,
 )
 
 
@@ -217,6 +220,54 @@ class TestDecompositionDetector:
     def test_clear_nonexistent_is_noop(self):
         det = DecompositionDetector()
         det.clear_decomposition("nonexistent")  # should not raise
+
+    def test_fusion_on_non_decomposed_locus(self):
+        """record_fusion_of_decomposition is a no-op for non-decomposed locus."""
+        det = DecompositionDetector()
+        det.record_fusion_of_decomposition("never_decomposed", "some_sha")
+        assert det.get_decomposition("never_decomposed") is None
+
+    def test_boundary_10_errors_3_clusters(self):
+        """Exactly MIN_ERRORS_FOR_SIGNAL errors with MIN_CLUSTERS_FOR_SIGNAL clusters triggers."""
+        det = DecompositionDetector()
+        patterns = ["type A error", "type B error", "type C error"]
+        for i in range(MIN_ERRORS_FOR_SIGNAL):
+            det.record_error("x", "sha", patterns[i % MIN_CLUSTERS_FOR_SIGNAL])
+        signal = det.analyze("x")
+        assert signal is not None
+        assert len(signal.error_clusters) == MIN_CLUSTERS_FOR_SIGNAL
+        assert signal.total_errors == MIN_ERRORS_FOR_SIGNAL
+
+    def test_boundary_9_errors_returns_none(self):
+        """One below threshold returns None."""
+        det = DecompositionDetector()
+        patterns = ["type A error", "type B error", "type C error"]
+        for i in range(MIN_ERRORS_FOR_SIGNAL - 1):
+            det.record_error("x", "sha", patterns[i % 3])
+        assert det.analyze("x") is None
+
+    def test_max_representative_cap(self):
+        """Cluster representative_messages capped at MAX_REPRESENTATIVE."""
+        det = DecompositionDetector()
+        # Need 10+ errors with 3+ clusters, one cluster with >MAX_REPRESENTATIVE entries
+        for i in range(MAX_REPRESENTATIVE + 5):
+            det.record_error("x", "sha", "repeated pattern error")
+        # Add 2 more distinct patterns to reach 3 clusters
+        for i in range(3):
+            det.record_error("x", "sha", "type B error distinct")
+        for i in range(3):
+            det.record_error("x", "sha", "type C error distinct")
+        signal = det.analyze("x")
+        assert signal is not None
+        # The largest cluster should be capped
+        biggest = max(signal.error_clusters, key=lambda c: c.count)
+        assert len(biggest.representative_messages) == MAX_REPRESENTATIVE
+
+    def test_normalize_empty_string(self):
+        """Empty and whitespace-only strings normalize cleanly."""
+        assert _normalize_error("") == ""
+        assert _normalize_error("\n") == ""
+        assert _normalize_error("  \n  ") == ""
 
 
 class TestMockDecompose:

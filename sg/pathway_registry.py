@@ -18,6 +18,8 @@ from sg.log import get_logger
 
 logger = get_logger("pathway_registry")
 
+MAX_ALLELES_PER_PATHWAY = 20
+
 
 @dataclass
 class StepSpec:
@@ -202,7 +204,24 @@ class PathwayRegistry:
             self._pathway_index.setdefault(pathway_name, [])
             if sha not in self._pathway_index[pathway_name]:
                 self._pathway_index[pathway_name].append(sha)
+            self._evict_if_over_cap(pathway_name)
         return sha
+
+    def _evict_if_over_cap(self, pathway_name: str) -> None:
+        """Evict oldest deprecated allele if pathway exceeds cap."""
+        shas = self._pathway_index.get(pathway_name, [])
+        if len(shas) <= MAX_ALLELES_PER_PATHWAY:
+            return
+        deprecated = [s for s in shas if s in self.alleles
+                      and self.alleles[s].state == "deprecated"]
+        if deprecated:
+            victim = min(deprecated,
+                         key=lambda s: self.alleles[s].created_at)
+        else:
+            victim = min(shas, key=lambda s: self.alleles[s].created_at
+                         if s in self.alleles else 0)
+        shas.remove(victim)
+        self.alleles.pop(victim, None)
 
     def get(self, sha: str) -> PathwayAllele | None:
         return self.alleles.get(sha)

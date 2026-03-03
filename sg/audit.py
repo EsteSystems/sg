@@ -6,8 +6,8 @@ with a timestamp, event type, locus/sha context, and free-form details.
 
 Known limitation: no log rotation. The audit log grows without bound.
 For long-running deployments, external log rotation (e.g. logrotate) is
-recommended. read_recent() scans the full file, so very large logs will
-have O(n) read cost.
+recommended. read_recent() uses tail-seeking for O(count) read cost;
+read_all() still scans the full file.
 
 Usage::
 
@@ -79,6 +79,37 @@ class AuditLog:
         return entries
 
     def read_recent(self, count: int = 100) -> list[AuditEntry]:
-        """Read the most recent *count* entries (tail of file)."""
-        all_entries = self.read_all()
-        return all_entries[-count:]
+        """Read the most recent *count* entries via tail-seeking."""
+        if not self.path.exists():
+            return []
+        with file_lock_shared(self.path):
+            with open(self.path, "rb") as f:
+                f.seek(0, 2)
+                file_size = f.tell()
+                if file_size == 0:
+                    return []
+                lines: list[str] = []
+                chunk_size = 8192
+                remaining = file_size
+                leftover = b""
+                while remaining > 0 and len(lines) < count:
+                    read_size = min(chunk_size, remaining)
+                    remaining -= read_size
+                    f.seek(remaining)
+                    chunk = f.read(read_size) + leftover
+                    chunk_lines = chunk.split(b"\n")
+                    leftover = chunk_lines[0]
+                    for raw in reversed(chunk_lines[1:]):
+                        line = raw.decode().strip()
+                        if line:
+                            lines.append(line)
+                        if len(lines) >= count:
+                            break
+                if leftover and len(lines) < count:
+                    line = leftover.decode().strip()
+                    if line:
+                        lines.append(line)
+        entries = []
+        for line in reversed(lines[:count]):
+            entries.append(AuditEntry.from_dict(json.loads(line)))
+        return entries

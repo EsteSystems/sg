@@ -320,6 +320,29 @@ New constructs:
 
 Pathway structure is itself evolvable. When a pathway repeatedly fails despite its constituent genes being individually fit, the system applies structural mutation operators — reordering steps, removing redundant ones, substituting compatible alternatives, or inserting new steps. The pathway becomes an entity with its own allele stack, promotion criteria, and lineage, subject to the same selection pressure as individual genes.
 
+#### Pathway Alleles
+
+Each pathway allele is identified by a **structure SHA** — a SHA-256 hash of the step sequence's structural fingerprint (step types, targets, loop variables, conditional branches). Parameters are excluded so that the same structure with different bindings shares an identity.
+
+Pathway alleles follow the same state machine as gene alleles:
+
+- **Recessive** — newly created by mutation, accumulating execution data
+- **Dominant** — currently active, resolving pathway executions
+- **Deprecated** — displaced by a fitter allele, candidate for eviction
+
+**Promotion**: a pathway allele needs 200+ executions and a fitness advantage of at least +0.15 over the current dominant. **Demotion**: 5 consecutive failures demote a pathway allele to deprecated.
+
+Four mutation operators produce new pathway alleles:
+
+| Operator | Signal | Action |
+|----------|--------|--------|
+| **Reorder** | Timing anomalies or failure hotspots at specific steps | Swap step order (adjacent swaps for >6 steps, full permutation search for ≤6) |
+| **Delete** | A step with perfect gene fitness and zero failure contribution | Remove the trivial step |
+| **Substitute** | A step's locus has low fitness and a compatible alternative exists | Replace with the highest-fitness compatible locus |
+| **Insert** | High per-step failure rate despite high gene fitness (structural gap) | LLM proposes a new step to insert before the problem step |
+
+Mutation is rate-limited: default 4-hour cooldown per pathway, configurable via `SG_PATHWAY_MUTATION_COOLDOWN`. Each mutant records its parent SHA and the operator that produced it, forming an ancestry tree visible via `sg lineage --pathway`.
+
 ### Level 3: Topology (Declarative Intent)
 
 The domain expert doesn't specify steps. They describe the desired end state:

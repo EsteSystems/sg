@@ -278,3 +278,49 @@ class TestStepsFromPathway:
         assert specs[0].condition_field == "mode"
         assert "fast" in specs[0].branches
         assert specs[0].branches["fast"]["target"] == "fast_path"
+
+    def test_composed_step_in_conditional(self):
+        """ComposedStep inside a conditional branch is captured."""
+        from sg.pathway import ComposedStep, ConditionalExecStep, Pathway
+        pathway = Pathway(name="test", steps=[
+            ConditionalExecStep(
+                condition_step_index=0,
+                condition_field="mode",
+                branches={
+                    "simple": ComposedStep(
+                        pathway_name="sub_pw",
+                        input_transform=lambda x, y: x,
+                    ),
+                },
+            ),
+        ])
+        specs = steps_from_pathway(pathway)
+        assert len(specs) == 1
+        assert specs[0].branches["simple"]["step_type"] == "composed"
+        assert specs[0].branches["simple"]["target"] == "sub_pw"
+
+
+class TestPathwayRegistryEdgeCases:
+    def test_corrupted_json_recovery(self, tmp_path):
+        """Corrupted JSON file recovers gracefully."""
+        root = tmp_path / "pr"
+        root.mkdir()
+        (root / "pathway_registry.json").write_text("{invalid json!!")
+        reg = PathwayRegistry.open(root)
+        assert len(reg.alleles) == 0
+
+    def test_get_nonexistent_sha(self, tmp_path):
+        """get() returns None for unknown SHA."""
+        reg = PathwayRegistry.open(tmp_path / "pr")
+        assert reg.get("nonexistent_sha_value") is None
+
+    def test_same_sha_different_pathway(self, tmp_path):
+        """Same structure SHA for different pathways: first registration wins."""
+        reg = PathwayRegistry.open(tmp_path / "pr")
+        steps = [StepSpec(step_type="locus", target="a")]
+        sha_a = reg.register("pathway_a", steps)
+        sha_b = reg.register("pathway_b", steps)
+        assert sha_a == sha_b
+        allele = reg.get(sha_a)
+        assert allele.pathway_name == "pathway_a"  # first registration wins
+        assert reg.get_for_pathway("pathway_b") == []  # not indexed under B

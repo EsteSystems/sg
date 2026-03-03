@@ -17,6 +17,8 @@ from sg.log import get_logger
 
 logger = get_logger("registry")
 
+MAX_ALLELES_PER_LOCUS = 50
+
 
 class AlleleState(str, Enum):
     DOMINANT = "dominant"
@@ -82,7 +84,25 @@ class Registry:
             self._locus_index.setdefault(locus, [])
             if sha not in self._locus_index[locus]:
                 self._locus_index[locus].append(sha)
+            self._evict_if_over_cap(locus)
         return sha
+
+    def _evict_if_over_cap(self, locus: str) -> None:
+        """Evict oldest deprecated allele if locus exceeds cap."""
+        shas = self._locus_index.get(locus, [])
+        if len(shas) <= MAX_ALLELES_PER_LOCUS:
+            return
+        # Prefer evicting deprecated alleles
+        deprecated = [s for s in shas if s in self.alleles
+                      and self.alleles[s].state == "deprecated"]
+        if deprecated:
+            victim = min(deprecated,
+                         key=lambda s: self.alleles[s].created_at)
+        else:
+            victim = min(shas, key=lambda s: self.alleles[s].created_at
+                         if s in self.alleles else 0)
+        shas.remove(victim)
+        self.alleles.pop(victim, None)
 
     def get(self, sha: str) -> AlleleMetadata | None:
         return self.alleles.get(sha)

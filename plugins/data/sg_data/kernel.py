@@ -61,6 +61,26 @@ class DataKernel(Kernel):
         """Delete the last N records from a table (for undo)."""
         ...
 
+    @mutating(
+        undo=lambda k, snap, connection, table, rules: None,
+    )
+    @abstractmethod
+    def clean_records(self, connection: str, table: str, rules: dict) -> dict:
+        """Clean records in a table. Returns cleaned_count and dropped_count."""
+        ...
+
+    @mutating(
+        undo=lambda k, snap, connection, source_table, target_table, mapping: (
+            k.delete_records(connection, target_table,
+                             len(k._get_table(connection, source_table).rows))
+        ),
+    )
+    @abstractmethod
+    def transform_records(self, connection: str, source_table: str,
+                          target_table: str, mapping: dict) -> dict:
+        """Transform records from source to target table. Returns transformed_count."""
+        ...
+
     # --- Self-description ---
 
     def describe_operations(self) -> list[str]:
@@ -72,6 +92,8 @@ class DataKernel(Kernel):
             "row_count(connection: str, table: str) -> int",
             "check_nulls(connection: str, table: str, column: str) -> dict",
             "delete_records(connection: str, table: str, count: int) -> None",
+            "clean_records(connection: str, table: str, rules: dict) -> dict",
+            "transform_records(connection: str, source_table: str, target_table: str, mapping: dict) -> dict",
         ]
 
     def mutation_prompt_context(self) -> str:

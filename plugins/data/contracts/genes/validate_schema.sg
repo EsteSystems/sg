@@ -1,0 +1,27 @@
+gene validate_schema for data
+  is diagnostic
+  risk none
+
+  does:
+    Check that a database table's schema matches expected columns.
+    Reports missing and extra columns. Used as a convergence signal
+    to detect schema drift before it causes downstream failures.
+
+  takes:
+    connection        string    "Database connection name"
+    table             string    "Table to validate"
+    expected_columns  string[]  "List of expected column names"
+
+  gives:
+    success          bool      "Whether the check completed"
+    healthy          bool      "Whether schema matches expectations"
+    missing_columns  string[]  "Columns expected but not present"
+    extra_columns    string[]  "Columns present but not expected"
+    error            string?   "Error message on failure"
+
+  feeds:
+    ingest_csv_to_table convergence
+
+  fails when:
+    - table does not exist -> success=false
+    - connection invalid -> success=false

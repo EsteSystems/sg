@@ -1,0 +1,36 @@
+gene transform_records for data
+  is configuration
+  risk low
+
+  does:
+    Transform records from a source table into a target table using a
+    column mapping. Reads from source, applies field renames and type
+    conversions, and writes to target. Tracks the target table for rollback.
+
+  takes:
+    connection    string  "Database connection name"
+    source_table  string  "Source table to read from"
+    target_table  string  "Target table to write to"
+    mapping       object  "Column mapping (source_col -> target_col)"
+
+  gives:
+    success            bool     "Whether transform completed"
+    transformed_count  int      "Number of rows transformed"
+    error              string?  "Error message on failure"
+
+  before:
+    - Source table exists and has rows
+    - Target table exists
+
+  after:
+    - Target table contains transformed records
+    - Source table is unmodified
+
+  fails when:
+    - source table does not exist -> success=false
+    - target table does not exist -> success=false
+    - mapping references nonexistent columns -> success=false
+
+  verify:
+    check_row_count connection={connection} table={target_table}
+    within 30s

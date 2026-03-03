@@ -1,0 +1,34 @@
+gene clean_records for data
+  is configuration
+  risk low
+
+  does:
+    Clean records in a database table by removing duplicates, filling
+    null values, and dropping rows that violate quality rules. Tracks
+    the table as a managed resource for rollback.
+
+  takes:
+    connection  string  "Database connection name"
+    table       string  "Table to clean"
+    rules       object  "Cleaning rules (drop_nulls, dedup_columns, fill_defaults)"
+
+  gives:
+    success        bool     "Whether cleaning completed"
+    cleaned_count  int      "Number of rows after cleaning"
+    dropped_count  int      "Number of rows removed"
+    error          string?  "Error message on failure"
+
+  before:
+    - Table exists and has rows to clean
+
+  after:
+    - Null values in specified columns are filled or rows dropped
+    - Duplicate rows removed based on dedup columns
+
+  fails when:
+    - table does not exist -> success=false
+    - table has no rows -> success=false
+
+  verify:
+    check_nulls connection={connection} table={table} column="id"
+    within 30s

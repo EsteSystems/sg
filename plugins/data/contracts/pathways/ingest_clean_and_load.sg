@@ -1,0 +1,46 @@
+pathway ingest_clean_and_load for data
+  risk low
+
+  does:
+    Full data pipeline: ingest CSV data, validate schema, clean records,
+    transform to warehouse schema, then verify data quality.
+
+  takes:
+    url               string    "URL to fetch CSV data from"
+    connection        string    "Database connection name"
+    table             string    "Staging table name"
+    target_table      string    "Warehouse target table name"
+    column            string    "Column to check for nulls"
+    expected_columns  string[]  "Expected column names for schema validation"
+    clean_rules       object    "Cleaning rules"
+    transform_mapping object    "Column mapping for transformation"
+
+  steps:
+    1. ingest_csv_to_table
+         url = {url}
+         connection = {connection}
+         table = {table}
+
+    2. validate_schema
+         connection = {connection}
+         table = {table}
+         expected_columns = {expected_columns}
+
+    3. clean_records
+         connection = {connection}
+         table = {table}
+         rules = {clean_rules}
+
+    4. transform_records
+         connection = {connection}
+         source_table = {table}
+         target_table = {target_table}
+         mapping = {transform_mapping}
+
+    5. check_nulls
+         connection = {connection}
+         table = {target_table}
+         column = {column}
+
+  on failure:
+    rollback all

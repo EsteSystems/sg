@@ -119,6 +119,60 @@ class MockDataKernel(DataKernel):
         tbl = self._get_table(connection, table)
         tbl.rows = tbl.rows[:-count] if count <= len(tbl.rows) else []
 
+    def clean_records(self, connection: str, table: str, rules: dict) -> dict:
+        self._check_failure("clean_records")
+        tbl = self._get_table(connection, table)
+        original_count = len(tbl.rows)
+        rows = list(tbl.rows)
+
+        # Drop rows with nulls in specified columns
+        drop_nulls = rules.get("drop_nulls", [])
+        if drop_nulls:
+            rows = [r for r in rows
+                    if all(r.get(c) is not None for c in drop_nulls)]
+
+        # Deduplicate on specified columns
+        dedup_columns = rules.get("dedup_columns", [])
+        if dedup_columns:
+            seen: set[tuple] = set()
+            deduped: list[dict] = []
+            for r in rows:
+                key = tuple(r.get(c) for c in dedup_columns)
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(r)
+            rows = deduped
+
+        # Fill defaults
+        fill_defaults = rules.get("fill_defaults", {})
+        for r in rows:
+            for col, default in fill_defaults.items():
+                if r.get(col) is None:
+                    r[col] = default
+
+        tbl.rows = rows
+        dropped = original_count - len(rows)
+        self.track_resource("table_clean", f"{connection}.{table}")
+        return {"cleaned_count": len(rows), "dropped_count": dropped}
+
+    def transform_records(self, connection: str, source_table: str,
+                          target_table: str, mapping: dict) -> dict:
+        self._check_failure("transform_records")
+        src = self._get_table(connection, source_table)
+        tgt = self._get_table(connection, target_table)
+
+        transformed = []
+        for row in src.rows:
+            new_row = {}
+            for src_col, tgt_col in mapping.items():
+                if src_col in row:
+                    new_row[tgt_col] = row[src_col]
+            transformed.append(new_row)
+
+        tgt.rows.extend(transformed)
+        self.track_resource("table_rows", f"{connection}.{target_table}")
+        return {"transformed_count": len(transformed)}
+
     # --- Resource tracking ---
 
     def track_resource(self, resource_type: str, name: str) -> None:

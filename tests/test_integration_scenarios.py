@@ -201,6 +201,70 @@ def execute(input_json: str) -> str:
         assert allele.total_invocations >= 5
 
 
+class TestScenarioA2_Decomposition:
+    """Decomposition trigger: diverse error types → decomposition signal."""
+
+    def test_error_diversity_triggers_signal(self, scenario):
+        orch = scenario["orch"]
+        setup_kernel(orch.kernel)
+
+        # Record 10+ errors with 3+ distinct failure patterns
+        sha = orch.phenotype.get_dominant("ingest_csv_to_table")
+        for i in range(5):
+            orch.decomposition_detector.record_error(
+                "ingest_csv_to_table", sha, "ConnectionError: network timeout")
+        for i in range(5):
+            orch.decomposition_detector.record_error(
+                "ingest_csv_to_table", sha, "KeyError: unexpected schema column 'new_field'")
+        for i in range(5):
+            orch.decomposition_detector.record_error(
+                "ingest_csv_to_table", sha, "ValueError: null ratio 0.8 exceeds threshold")
+
+        signal = orch.decomposition_detector.analyze("ingest_csv_to_table")
+        assert signal is not None
+        assert len(signal.error_clusters) >= 3
+        assert signal.total_errors >= 10
+
+
+class TestScenarioA3_PathwayMutation:
+    """Pathway structural mutation: reordering based on failure signals."""
+
+    def test_reordering_operator(self, scenario):
+        from sg.pathway_mutation import (
+            PathwayMutationContext, ReorderingOperator,
+        )
+        from sg.pathway_registry import StepSpec
+        from sg.pathway_fitness import TimingAnomaly
+
+        orch = scenario["orch"]
+        steps = [
+            StepSpec(step_type="locus", target="validate_schema"),
+            StepSpec(step_type="locus", target="ingest_csv_to_table"),
+        ]
+        ctx = PathwayMutationContext(
+            pathway_name="ingest_and_validate",
+            current_steps=steps,
+            pathway_fitness=0.3,
+            per_step_fitness={"validate_schema": 0.9, "ingest_csv_to_table": 0.9},
+            timing_anomalies=[
+                TimingAnomaly(step_name="validate_schema",
+                              latest_ms=5000.0, avg_ms=2000.0, ratio=2.5),
+            ],
+            failure_distribution={"validate_schema": 0.4, "ingest_csv_to_table": 0.1},
+            input_clusters=[],
+            available_loci=list(orch.contract_store.genes.keys()),
+            available_pathways=list(orch.contract_store.pathways.keys()),
+            gene_fitness_map={},
+            contract=None,
+            contract_store=orch.contract_store,
+        )
+        op = ReorderingOperator()
+        assert op.can_apply(ctx)
+        result = op.apply(ctx)
+        assert result is not None
+        assert result.new_steps[0].target != steps[0].target
+
+
 class TestScenarioB_ContractTightening:
     """Contract evolution: extra fields → tighten proposal."""
 

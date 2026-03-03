@@ -17,6 +17,11 @@ from sg.pathway_mutation import (
     DeletionOperator,
     StepSubstitutionOperator,
     InsertionOperator,
+    ConditionalWrappingOperator,
+    LoopIntroductionOperator,
+    StepSplittingOperator,
+    StepMergingOperator,
+    ParallelizationOperator,
     select_operator,
     default_operators,
     _reindex_conditionals_after_delete,
@@ -589,20 +594,251 @@ class TestReindexConditionals:
         assert result[1].condition_step_index == 1
 
 
+# --- New operator tests ---
+
+
+class TestConditionalWrappingOperator:
+    def test_wraps_failing_step_with_diagnostic(self):
+        store = ContractStore()
+        from sg.parser.types import GeneContract, FieldDef, GeneFamily, BlastRadius
+        store.genes["check_ready"] = GeneContract(
+            name="check_ready", does="checks readiness",
+            takes=[], gives=[FieldDef(name="status", type="string")],
+            family=GeneFamily.DIAGNOSTIC, risk=BlastRadius.NONE,
+        )
+        store.genes["deploy"] = GeneContract(
+            name="deploy", does="deploys service",
+            takes=[FieldDef(name="config", type="object")],
+            gives=[FieldDef(name="result", type="string")],
+            family=GeneFamily.CONFIGURATION, risk=BlastRadius.LOW,
+        )
+        ctx = _make_ctx(
+            steps=[
+                StepSpec(step_type="locus", target="deploy"),
+            ],
+            failure_distribution={"deploy": 0.6},
+            per_step_fitness={"deploy": 0.4},
+            gene_fitness_map={"check_ready": 0.9, "deploy": 0.4},
+            available_loci=["deploy", "check_ready"],
+            contract_store=store,
+        )
+        op = ConditionalWrappingOperator()
+        assert op.name == "conditional_wrapping"
+        assert op.can_apply(ctx)
+        result = op.apply(ctx)
+        assert result is not None
+        assert result.operator_name == "conditional_wrapping"
+        assert len(result.new_steps) == 2
+        assert result.new_steps[0].target == "check_ready"
+        assert result.new_steps[1].step_type == "conditional"
+
+    def test_no_diagnostic_available(self):
+        store = ContractStore()
+        from sg.parser.types import GeneContract, GeneFamily, BlastRadius
+        store.genes["deploy"] = GeneContract(
+            name="deploy", does="deploys",
+            takes=[], gives=[],
+            family=GeneFamily.CONFIGURATION, risk=BlastRadius.LOW,
+        )
+        ctx = _make_ctx(
+            steps=[StepSpec(step_type="locus", target="deploy")],
+            failure_distribution={"deploy": 0.6},
+            available_loci=["deploy"],
+            contract_store=store,
+        )
+        op = ConditionalWrappingOperator()
+        assert not op.can_apply(ctx)
+
+
+class TestLoopIntroductionOperator:
+    def test_wraps_transient_failure_in_retry(self):
+        ctx = _make_ctx(
+            steps=[
+                StepSpec(step_type="locus", target="a"),
+                StepSpec(step_type="locus", target="b"),
+            ],
+            failure_distribution={"a": 0.35, "b": 0.01},
+            per_step_fitness={"a": 0.7, "b": 0.95},
+        )
+        op = LoopIntroductionOperator()
+        assert op.name == "loop_introduction"
+        assert op.can_apply(ctx)
+        result = op.apply(ctx)
+        assert result is not None
+        assert result.new_steps[0].step_type == "loop"
+        assert result.new_steps[0].loop_variable == "attempt"
+        assert result.new_steps[0].target == "a"
+
+    def test_skip_already_looped_step(self):
+        ctx = _make_ctx(
+            steps=[
+                StepSpec(step_type="locus", target="a",
+                         loop_variable="x", loop_iterable="[1,2]"),
+            ],
+            failure_distribution={"a": 0.4},
+            per_step_fitness={"a": 0.7},
+        )
+        op = LoopIntroductionOperator()
+        assert not op.can_apply(ctx)
+
+    def test_no_transient_failures(self):
+        ctx = _make_ctx(
+            steps=[StepSpec(step_type="locus", target="a")],
+            failure_distribution={"a": 0.05},
+            per_step_fitness={"a": 0.95},
+        )
+        op = LoopIntroductionOperator()
+        assert not op.can_apply(ctx)
+
+
+class TestStepSplittingOperator:
+    def test_proposes_split_via_llm(self):
+        class FakeEngine:
+            def propose_pathway_insertion(self, **kwargs):
+                return {
+                    "locus": "prep_a",
+                    "insert_before_index": kwargs["problem_step_index"],
+                    "params": {},
+                    "rationale": "split complex step",
+                }
+
+        ctx = _make_ctx(
+            steps=[StepSpec(step_type="locus", target="a")],
+            failure_distribution={"a": 0.5},
+            available_loci=["a", "prep_a"],
+            input_clusters=[
+                InputCluster(failure_step="a", count=5),
+                InputCluster(failure_step="a", count=3),
+            ],
+        )
+        op = StepSplittingOperator(FakeEngine())
+        assert op.name == "step_splitting"
+        assert op.can_apply(ctx)
+        result = op.apply(ctx)
+        assert result is not None
+        assert len(result.new_steps) == 2
+        assert result.new_steps[0].target == "prep_a"
+
+    def test_no_split_without_clusters(self):
+        ctx = _make_ctx(
+            steps=[StepSpec(step_type="locus", target="a")],
+            failure_distribution={"a": 0.5},
+            input_clusters=[],
+        )
+        op = StepSplittingOperator(object())
+        assert not op.can_apply(ctx)
+
+
+class TestStepMergingOperator:
+    def test_merges_adjacent_perfect_steps(self):
+        ctx = _make_ctx(
+            steps=[
+                StepSpec(step_type="locus", target="a"),
+                StepSpec(step_type="locus", target="b"),
+                StepSpec(step_type="locus", target="c"),
+            ],
+            failure_distribution={"a": 0.0, "b": 0.01, "c": 0.3},
+            per_step_fitness={"a": 0.99, "b": 0.98, "c": 0.5},
+        )
+        op = StepMergingOperator()
+        assert op.name == "step_merging"
+        assert op.can_apply(ctx)
+        result = op.apply(ctx)
+        assert result is not None
+        assert len(result.new_steps) == 2
+        assert result.new_steps[0].step_type == "composed"
+        assert result.new_steps[1].target == "c"
+
+    def test_no_merge_when_steps_differ(self):
+        ctx = _make_ctx(
+            steps=[
+                StepSpec(step_type="locus", target="a"),
+                StepSpec(step_type="locus", target="b"),
+            ],
+            failure_distribution={"a": 0.0, "b": 0.3},
+            per_step_fitness={"a": 0.99, "b": 0.5},
+        )
+        op = StepMergingOperator()
+        assert not op.can_apply(ctx)
+
+
+class TestParallelizationOperator:
+    def test_parallelizes_independent_steps(self):
+        store = ContractStore()
+        from sg.parser.types import GeneContract, FieldDef, GeneFamily, BlastRadius
+        store.genes["a"] = GeneContract(
+            name="a", does="does a",
+            takes=[FieldDef(name="x", type="string")],
+            gives=[FieldDef(name="y", type="string")],
+            family=GeneFamily.CONFIGURATION, risk=BlastRadius.LOW,
+        )
+        store.genes["b"] = GeneContract(
+            name="b", does="does b",
+            takes=[FieldDef(name="p", type="string")],
+            gives=[FieldDef(name="q", type="string")],
+            family=GeneFamily.CONFIGURATION, risk=BlastRadius.LOW,
+        )
+        ctx = _make_ctx(
+            steps=[
+                StepSpec(step_type="locus", target="a"),
+                StepSpec(step_type="locus", target="b"),
+            ],
+            available_loci=["a", "b"],
+            contract_store=store,
+        )
+        op = ParallelizationOperator()
+        assert op.name == "parallelization"
+        assert op.can_apply(ctx)
+        result = op.apply(ctx)
+        assert result is not None
+        assert len(result.new_steps) == 1
+        assert "parallel" in result.new_steps[0].target
+
+    def test_no_parallelization_when_dependent(self):
+        store = ContractStore()
+        from sg.parser.types import GeneContract, FieldDef, GeneFamily, BlastRadius
+        store.genes["a"] = GeneContract(
+            name="a", does="does a",
+            takes=[], gives=[FieldDef(name="x", type="string", required=True)],
+            family=GeneFamily.CONFIGURATION, risk=BlastRadius.LOW,
+        )
+        store.genes["b"] = GeneContract(
+            name="b", does="does b",
+            takes=[FieldDef(name="x", type="string", required=True)],
+            gives=[],
+            family=GeneFamily.CONFIGURATION, risk=BlastRadius.LOW,
+        )
+        ctx = _make_ctx(
+            steps=[
+                StepSpec(step_type="locus", target="a"),
+                StepSpec(step_type="locus", target="b"),
+            ],
+            available_loci=["a", "b"],
+            contract_store=store,
+        )
+        op = ParallelizationOperator()
+        assert not op.can_apply(ctx)
+
+
 # --- Integration tests ---
 
 
 class TestDefaultOperators:
     def test_default_operators_without_engine(self):
         ops = default_operators()
-        assert len(ops) == 3
+        assert len(ops) == 7
         names = [op.name for op in ops]
-        assert names == ["reorder", "substitution", "deletion"]
+        assert names == [
+            "reorder", "substitution", "deletion",
+            "step_merging", "conditional_wrapping",
+            "loop_introduction", "parallelization",
+        ]
 
     def test_default_operators_with_engine(self):
         ops = default_operators(mutation_engine=object())
-        assert len(ops) == 4
-        assert ops[-1].name == "insertion"
+        assert len(ops) == 9
+        assert ops[-2].name == "insertion"
+        assert ops[-1].name == "step_splitting"
 
 
 class TestOrchestratorIntegration:

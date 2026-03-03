@@ -58,6 +58,19 @@ sg/                               # core runtime
 ├── sandbox.py                    # isolated Python execution context
 ├── verify.py                     # timer-based verify scheduling (convergence/resilience)
 │
+├── topology_mutation.py           # topology mutation operators (reorder, action swap, eliminate, LLM)
+│
+│  ── Contract & meta evolution ──
+├── contract_evolution.py         # contract tightening, relaxation, feeds discovery
+├── locus_discovery.py            # cross-locus failure analysis → new locus proposals
+├── adaptation.py                 # adaptive param tuning + adaptive safety policies
+├── speciation.py                 # phenotype divergence tracking across organisms
+│
+│  ── Continuous operation ──
+├── daemon.py                     # tick-based daemon loop (sg daemon)
+├── events.py                     # in-process event bus (pub/sub)
+├── metrics.py                    # Prometheus-style metrics collector + export
+│
 │  ── Persistence & ops ──
 ├── filelock.py                   # file locking (shared/exclusive) + atomic writes
 ├── audit.py                      # append-only JSONL event log
@@ -74,22 +87,15 @@ sg/                               # core runtime
 └── pool_server.py                # gene pool HTTP server
 
 plugins/                          # domain-specific plugins
-├── network/                      # network infrastructure domain
-│   ├── sg_network/               # installable package
-│   │   ├── kernel.py             # NetworkKernel ABC
-│   │   ├── mock.py               # MockNetworkKernel (dev/test)
-│   │   ├── production.py         # ProductionNetworkKernel (NM D-Bus, ip link)
-│   │   └── mappers.py            # resource → kernel call mapping
-│   ├── contracts/                # .sg contracts (genes/, pathways/, topologies/)
-│   ├── genes/                    # seed gene implementations (v1)
-│   └── fixtures/                 # mutation fix + fused pathway fixtures
-└── data/                         # data pipeline domain
-    ├── sg_data/                  # installable package
-    │   ├── kernel.py             # DataKernel ABC
-    │   └── mock.py               # MockDataKernel
-    ├── contracts/                # .sg contracts
-    ├── genes/                    # seed gene implementations
-    └── fixtures/                 # mutation fix fixtures
+├── data/                         # data pipeline domain (active)
+│   ├── sg_data/                  # installable package
+│   │   ├── kernel.py             # DataKernel ABC
+│   │   └── mock.py               # MockDataKernel (dev/test)
+│   ├── contracts/                # .sg contracts (genes/, pathways/)
+│   ├── genes/                    # seed gene implementations
+│   └── fixtures/                 # mutation fix fixtures
+└── network/                      # network infrastructure domain (shelved)
+    └── ...                       # validated the architecture; not active
 ```
 
 ## Conventions
@@ -114,11 +120,10 @@ plugins/                          # domain-specific plugins
 
 ```bash
 pip install -e ".[dev]"
-pip install -e plugins/network
-pip install -e plugins/data    # optional
+pip install -e plugins/data
 pytest
-sg init
-sg run <pathway> --input '{...}'
+sg init --kernel data-mock
+sg run ingest_and_validate --input '{...}'
 sg status
 ```
 
@@ -129,5 +134,5 @@ sg status
 - **Temporal fitness**: immediate (t=0) + convergence (t=30s) + resilience (t=hours). Retroactive decay when convergence/resilience fail.
 - **Composition hierarchy**: gene → pathway → topology → intent. Pathways compose via `->`, iterate via `for`, bind conditionally via `when`.
 - **Safety**: transactions with undo-log, blast radius classification (none → critical), shadow mode → canary → recessive → dominant allele lifecycle.
-- **Domain-agnostic core**: kernel is an abstract interface. Domain-specific logic lives in plugins (network, data). Contracts, genes, and fixtures are shipped per-plugin.
+- **Domain-agnostic core**: kernel is an abstract interface. Domain-specific logic lives in plugins. The active plugin is `data` (data pipelines). The `network` plugin validated the architecture but is shelved.
 - **Operational hardening**: atomic writes (temp file + rename), corrupted state recovery (try/except on all loads), shared read locks, fault-isolated save_state.

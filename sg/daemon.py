@@ -42,6 +42,8 @@ class Daemon:
         self.metrics_collector = metrics_collector
         self._running = False
         self._tick_count = 0
+        self._tuner = None
+        self._safety = None
 
     @property
     def tick_count(self) -> int:
@@ -136,8 +138,36 @@ class Daemon:
                 logger.debug("failed to save metrics snapshot", exc_info=True)
 
     def _run_health_checks(self) -> None:
-        """Periodic health tasks: speciation snapshots."""
+        """Periodic health tasks: run diagnostics, update gauges, record speciation."""
         logger.debug("running health checks (tick %d)", self._tick_count)
+
+        # Run diagnostic pathways with synthetic inputs
+        store = getattr(self.orchestrator, "contract_store", None)
+        if store and hasattr(self.orchestrator, "run_pathway"):
+            try:
+                from sg.parser.types import PathwayContract, PathwayStep
+                for name, pathway in store.items():
+                    if not isinstance(pathway, PathwayContract):
+                        continue
+                    steps = getattr(pathway, "steps", [])
+                    if not steps:
+                        continue
+                    first = steps[0]
+                    if isinstance(first, PathwayStep):
+                        gene = store.get(first.locus)
+                        if gene and getattr(gene, "family", None) == "diagnostic":
+                            try:
+                                self.orchestrator.run_pathway(name, "{}")
+                            except Exception:
+                                logger.debug("health check pathway '%s' failed",
+                                             name, exc_info=True)
+            except Exception:
+                logger.debug("diagnostic pathway scan failed", exc_info=True)
+
+        # Update metric gauges
+        if self.metrics_collector is not None:
+            self._update_gauges()
+
         # Record speciation snapshot periodically
         if (self._tick_count % 50 == 0
                 and hasattr(self.orchestrator, '_speciation_tracker')):
@@ -153,16 +183,43 @@ class Daemon:
             except Exception:
                 logger.debug("speciation snapshot failed", exc_info=True)
 
+    def _update_gauges(self) -> None:
+        """Compute and set sg_avg_fitness and sg_active_loci gauges."""
+        phenotype = getattr(self.orchestrator, "phenotype", None)
+        registry = getattr(self.orchestrator, "registry", None)
+        if not phenotype or not registry:
+            return
+        try:
+            from sg.arena import compute_fitness
+            fitnesses = []
+            active = 0
+            for locus in phenotype.loci():
+                dom_sha = phenotype.get_dominant(locus)
+                if dom_sha:
+                    active += 1
+                    allele = registry.get(dom_sha)
+                    if allele:
+                        params = self.orchestrator._get_params(locus)
+                        fitnesses.append(compute_fitness(allele, params=params))
+            self.metrics_collector.sg_active_loci.set(active)
+            if fitnesses:
+                self.metrics_collector.sg_avg_fitness.set(
+                    sum(fitnesses) / len(fitnesses))
+        except Exception:
+            logger.debug("gauge update failed", exc_info=True)
+
     def _run_auto_tune(self) -> None:
         """Run adaptive parameter tuning and safety analysis."""
         logger.debug("running auto-tune (tick %d)", self._tick_count)
 
-        # Adaptive parameter tuning
+        # Adaptive parameter tuning (persistent tuner across ticks)
         if self.orchestrator._meta_param_tracker is not None:
             try:
-                from sg.adaptation import AdaptiveParamTuner
-                tuner = AdaptiveParamTuner(self.orchestrator._meta_param_tracker)
-                recs = tuner.auto_tune()
+                if self._tuner is None:
+                    from sg.adaptation import AdaptiveParamTuner
+                    self._tuner = AdaptiveParamTuner(
+                        self.orchestrator._meta_param_tracker)
+                recs = self._tuner.auto_tune()
                 if recs:
                     logger.info("auto-tune applied %d recommendation(s)", len(recs))
                     for rec in recs:
@@ -176,9 +233,10 @@ class Daemon:
         # Adaptive safety analysis (advisory only — logged, not auto-applied)
         if self.orchestrator.audit_log is not None:
             try:
-                from sg.adaptation import AdaptiveSafety
-                safety = AdaptiveSafety(self.orchestrator.audit_log)
-                adjustments = safety.analyze(self.orchestrator.contract_store)
+                if self._safety is None:
+                    from sg.adaptation import AdaptiveSafety
+                    self._safety = AdaptiveSafety(self.orchestrator.audit_log)
+                adjustments = self._safety.analyze(self.orchestrator.contract_store)
                 if adjustments:
                     logger.info("safety analysis: %d recommendation(s)", len(adjustments))
                     for adj in adjustments:

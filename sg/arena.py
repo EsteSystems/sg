@@ -21,6 +21,8 @@ MIN_INVOCATIONS_FOR_SCORE = 10
 PROMOTION_ADVANTAGE = 0.1
 PROMOTION_MIN_INVOCATIONS = 50
 DEMOTION_CONSECUTIVE_FAILURES = 3
+CANARY_MIN_SUCCESSES = 10
+CANARY_TRAFFIC_FRACTION = 0.2
 
 
 def compute_fitness(
@@ -102,5 +104,31 @@ def set_recessive(allele: AlleleMetadata) -> None:
     allele.state = AlleleState.RECESSIVE.value
 
 
+def set_canary(allele: AlleleMetadata) -> None:
+    allele.state = AlleleState.CANARY.value
+
+
 def set_deprecated(allele: AlleleMetadata) -> None:
     allele.state = AlleleState.DEPRECATED.value
+
+
+def should_graduate_canary(
+    allele: AlleleMetadata,
+    params: EvolutionaryParams | None = None,
+) -> bool:
+    """Check if a canary allele has accumulated enough successes to graduate."""
+    min_successes = CANARY_MIN_SUCCESSES
+    if allele.state != AlleleState.CANARY.value:
+        return False
+    return allele.canary_successes >= min_successes
+
+
+def should_fail_canary(allele: AlleleMetadata) -> bool:
+    """Check if a canary allele has failed enough times to be reverted."""
+    if allele.state != AlleleState.CANARY.value:
+        return False
+    total = allele.canary_successes + allele.canary_failures
+    if total < 5:
+        return False
+    failure_rate = allele.canary_failures / total
+    return failure_rate > 0.5

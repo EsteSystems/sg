@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Callable
 
 from sg.kernel.base import Kernel
-from sg.sandbox import make_sandbox_globals
+from sg.sandbox import make_sandbox_globals, execute_with_timeout, DEFAULT_TIMEOUT
 
 
 def load_gene(source: str, kernel: Kernel) -> Callable[[str], str]:
@@ -30,10 +30,18 @@ def load_gene(source: str, kernel: Kernel) -> Callable[[str], str]:
     return execute_fn
 
 
-def call_gene(execute_fn: Callable[[str], str], input_json: str) -> str:
-    """Call a loaded gene's execute function with error wrapping."""
+def call_gene(
+    execute_fn: Callable[[str], str],
+    input_json: str,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> str:
+    """Call a loaded gene's execute function with timeout and error wrapping.
+
+    Uses signal-based timeout on Unix main thread, threading-based fallback
+    otherwise. Set timeout=0 to disable.
+    """
     try:
-        result = execute_fn(input_json)
+        result = execute_with_timeout(execute_fn, input_json, timeout=timeout)
     except Exception as e:
         raise RuntimeError(f"gene execution failed: {e}") from e
 

@@ -22,6 +22,7 @@ MAX_ALLELES_PER_LOCUS = 50
 
 class AlleleState(str, Enum):
     DOMINANT = "dominant"
+    CANARY = "canary"
     RECESSIVE = "recessive"
     DEPRECATED = "deprecated"
 
@@ -37,6 +38,8 @@ class AlleleMetadata:
     failed_invocations: int = 0
     consecutive_failures: int = 0
     shadow_successes: int = 0
+    canary_successes: int = 0
+    canary_failures: int = 0
     created_at: float = field(default_factory=time.time)
     fitness_records: list[dict] = field(default_factory=list)
     peer_observations: list[dict] = field(default_factory=list)

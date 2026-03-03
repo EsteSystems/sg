@@ -10,6 +10,7 @@ dependencies = [
 
 [project.entry-points."sg.kernels"]
 data-mock = "sg_data.mock:MockDataKernel"
+data-production = "sg_data.production:ProductionDataKernel"
 
 [tool.setuptools.packages.find]
 include = ["sg_data*"]

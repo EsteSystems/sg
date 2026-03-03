@@ -23,7 +23,7 @@ from sg.mutation import MutationEngine, MutationContext
 from sg.parser.types import BlastRadius
 from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contract
 from sg.phenotype import PhenotypeMap
-from sg.registry import Registry
+from sg.registry import Registry, AlleleState
 from sg.safety import Transaction, SafeKernel, requires_transaction, is_shadow_only, SHADOW_PROMOTION_THRESHOLD
 from sg.contract_evolution import ContractEvolution
 from sg.decomposition import DecompositionDetector
@@ -149,6 +149,12 @@ class Orchestrator:
         risk = self._get_risk(locus)
         use_txn = requires_transaction(risk)
         use_shadow = is_shadow_only(risk)
+
+        # Canary routing: if a canary allele exists, route a fraction of
+        # traffic to it before falling through to the normal stack.
+        canary_result = self._try_canary_execution(locus, stack, input_json)
+        if canary_result is not None:
+            return canary_result
 
         for sha in stack:
             source = self.registry.load_source(sha)
@@ -481,6 +487,21 @@ class Orchestrator:
         dominant_sha = self.phenotype.get_dominant(locus)
         dominant = self.registry.get(dominant_sha) if dominant_sha else None
 
+        # Check if a canary allele has graduated
+        if allele and allele.state == AlleleState.CANARY.value:
+            if arena.should_graduate_canary(allele):
+                self._graduate_canary(locus, sha, allele, dominant)
+            elif arena.should_fail_canary(allele):
+                arena.set_recessive(allele)
+                allele.canary_successes = 0
+                allele.canary_failures = 0
+                logger.info("canary %s reverted to recessive for %s",
+                            sha[:12], locus,
+                            extra={"locus": locus, "sha": sha[:12],
+                                   "event": "canary_reverted"})
+                self._audit("canary_reverted", locus=locus, sha=sha)
+            return
+
         params = self._get_params(locus)
         if allele and arena.should_promote(allele, dominant, params=params):
             # Test cross-locus interactions before promoting
@@ -496,6 +517,16 @@ class Orchestrator:
                                 failures=[f.pathway_name
                                           for f in interaction_failures])
                     return
+
+            # Enter canary instead of immediate promotion for non-trivial risk
+            risk = self._get_risk(locus)
+            if risk in (BlastRadius.MEDIUM, BlastRadius.HIGH, BlastRadius.CRITICAL):
+                arena.set_canary(allele)
+                logger.info("canary %s started for %s", sha[:12], locus,
+                            extra={"locus": locus, "sha": sha[:12],
+                                   "event": "canary_started"})
+                self._audit("canary_started", locus=locus, sha=sha)
+                return
 
             arena.set_dominant(allele)
             if dominant:
@@ -513,6 +544,36 @@ class Orchestrator:
                     outcome_fitness=fitness,
                     allele_sha=sha, allele_survived=True,
                 )
+
+    def _graduate_canary(
+        self, locus: str, sha: str,
+        allele: AlleleMetadata, dominant: AlleleMetadata | None,
+    ) -> None:
+        """Graduate a canary allele to dominant after sufficient canary successes."""
+        params = self._get_params(locus)
+        arena.set_dominant(allele)
+        if dominant:
+            arena.set_recessive(dominant)
+        self.phenotype.promote(locus, sha)
+        fitness = arena.compute_fitness(allele, params=params)
+        logger.info("canary %s graduated to dominant for %s "
+                    "(canary: %d successes, %d failures)",
+                    sha[:12], locus,
+                    allele.canary_successes, allele.canary_failures,
+                    extra={"locus": locus, "sha": sha[:12],
+                           "event": "canary_graduated"})
+        self._audit("canary_graduated", locus=locus, sha=sha,
+                    fitness=fitness,
+                    canary_successes=allele.canary_successes,
+                    canary_failures=allele.canary_failures)
+        from sg.events import allele_promoted
+        self._publish(allele_promoted(locus, sha, fitness))
+        if self._meta_param_tracker is not None:
+            self._meta_param_tracker.record_snapshot(
+                entity_name=locus, entity_type="gene",
+                outcome_fitness=fitness,
+                allele_sha=sha, allele_survived=True,
+            )
 
     def _test_promotion_interactions(self, locus: str, sha: str) -> list:
         """Test an allele against cross-locus pathways before promotion."""
@@ -573,6 +634,67 @@ class Orchestrator:
                         locus, target_locus, timescale,
                         "healthy" if healthy else "unhealthy", fitness,
                         extra={"locus": locus})
+
+    def _try_canary_execution(
+        self, locus: str, stack: list[str], input_json: str,
+    ) -> tuple[str, str] | None:
+        """Route traffic to a canary allele probabilistically.
+
+        Returns (result, sha) if the canary handled this request,
+        or None to fall through to the normal stack.
+        """
+        import random
+
+        canary_sha = None
+        for sha in stack:
+            allele = self.registry.get(sha)
+            if allele and allele.state == AlleleState.CANARY.value:
+                canary_sha = sha
+                break
+
+        if canary_sha is None:
+            return None
+
+        if random.random() > arena.CANARY_TRAFFIC_FRACTION:
+            return None
+
+        allele = self.registry.get(canary_sha)
+        source = self.registry.load_source(canary_sha)
+        if source is None or allele is None:
+            return None
+
+        risk = self._get_risk(locus)
+        use_txn = requires_transaction(risk)
+        txn = Transaction(locus, risk) if use_txn else None
+        kernel = SafeKernel(self.kernel, txn) if txn else self.kernel
+
+        try:
+            execute_fn = load_gene(source, kernel)
+            result = call_gene(execute_fn, input_json)
+
+            if not validate_output(locus, result, self.contract_store):
+                raise RuntimeError(f"canary output validation failed for {locus}")
+
+            if txn:
+                txn.commit()
+            allele.canary_successes += 1
+            arena.record_success(allele)
+            self._check_promotion(locus, canary_sha)
+            logger.info("canary %s handled request (%d/%d successes)",
+                        canary_sha[:12], allele.canary_successes,
+                        arena.CANARY_MIN_SUCCESSES,
+                        extra={"locus": locus, "sha": canary_sha[:12]})
+            return (result, canary_sha)
+
+        except Exception as e:
+            if txn and txn.action_count > 0:
+                txn.rollback()
+            allele.canary_failures += 1
+            arena.record_failure(allele)
+            self._check_promotion(locus, canary_sha)
+            logger.warning("canary %s failed: %s", canary_sha[:12], e,
+                           extra={"locus": locus, "sha": canary_sha[:12]})
+            return None
 
     def _schedule_verify(self, locus: str, input_json: str) -> None:
         """Schedule verify diagnostics if the locus contract declares a verify block."""

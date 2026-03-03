@@ -148,3 +148,52 @@ def test_should_promote_uses_custom_fitness_weights():
         convergence_decay_factor=0.0,
     )
     assert should_promote(candidate, dominant, params=params)
+
+
+class TestCanaryLifecycle:
+    def test_set_canary_state(self):
+        from sg.arena import set_canary
+        allele = make_allele()
+        set_canary(allele)
+        assert allele.state == "canary"
+
+    def test_should_graduate_canary(self):
+        from sg.arena import set_canary, should_graduate_canary, CANARY_MIN_SUCCESSES
+        allele = make_allele()
+        set_canary(allele)
+        allele.canary_successes = CANARY_MIN_SUCCESSES - 1
+        assert not should_graduate_canary(allele)
+        allele.canary_successes = CANARY_MIN_SUCCESSES
+        assert should_graduate_canary(allele)
+
+    def test_should_not_graduate_non_canary(self):
+        from sg.arena import should_graduate_canary, CANARY_MIN_SUCCESSES
+        allele = make_allele()
+        allele.canary_successes = CANARY_MIN_SUCCESSES + 10
+        assert not should_graduate_canary(allele)
+
+    def test_should_fail_canary(self):
+        from sg.arena import set_canary, should_fail_canary
+        allele = make_allele()
+        set_canary(allele)
+        allele.canary_successes = 2
+        allele.canary_failures = 4
+        assert should_fail_canary(allele)
+
+    def test_should_not_fail_healthy_canary(self):
+        from sg.arena import set_canary, should_fail_canary
+        allele = make_allele()
+        set_canary(allele)
+        allele.canary_successes = 8
+        allele.canary_failures = 2
+        assert not should_fail_canary(allele)
+
+    def test_canary_fields_in_metadata(self):
+        allele = make_allele()
+        assert allele.canary_successes == 0
+        assert allele.canary_failures == 0
+        allele.canary_successes = 5
+        d = allele.to_dict()
+        assert d["canary_successes"] == 5
+        restored = AlleleMetadata.from_dict(d)
+        assert restored.canary_successes == 5

@@ -26,8 +26,7 @@ pip install -e ".[openai]"             # + openai SDK
 pip install -e ".[deepseek]"           # + openai SDK (DeepSeek-compatible)
 pip install -e ".[all]"                # everything
 
-# Domain plugins (install the ones you need):
-pip install -e plugins/network         # network configuration domain
+# Domain plugin:
 pip install -e plugins/data            # data pipeline domain
 ```
 
@@ -99,14 +98,11 @@ sg/                               # core engine (domain-agnostic)
     └── stub.py                   # minimal stub kernel
 
 plugins/                          # domain plugins (installable packages)
-├── network/                      # network configuration domain
-│   ├── sg_network/               # kernel, mock, production, mappers
+├── data/                         # data pipeline domain (active)
+│   ├── sg_data/                  # kernel, mock
 │   ├── contracts/                # .sg contracts
 │   └── genes/                    # seed genes
-└── data/                         # data pipeline domain
-    ├── sg_data/                  # kernel, mock
-    ├── contracts/                # .sg contracts
-    └── genes/                    # seed genes
+└── network/                      # network domain (shelved — architecture validation)
 
 vim/sg/                           # Neovim syntax highlighting plugin
 ```
@@ -405,17 +401,16 @@ The `gene_sdk` object is injected into the gene's namespace at load time. It is 
 
 The available operations depend on which domain plugin is loaded. Each kernel declares its operations via `describe_operations()`. Examples:
 
-**Network domain** (`sg-network` plugin):
-- `gene_sdk.create_bridge(name, interfaces)` → dict
-- `gene_sdk.delete_bridge(name)` → None
-- `gene_sdk.set_stp(bridge_name, enabled, forward_delay)` → dict
-- `gene_sdk.create_bond(name, mode, members)` → dict
-
 **Data pipeline domain** (`sg-data` plugin):
 - `gene_sdk.http_get(url, headers)` → dict
 - `gene_sdk.write_records(connection, table, records)` → int
 - `gene_sdk.query_db(connection, sql)` → list[dict]
+- `gene_sdk.get_table_schema(connection, table)` → dict
 - `gene_sdk.row_count(connection, table)` → int
+- `gene_sdk.check_nulls(connection, table, column)` → dict
+- `gene_sdk.clean_records(connection, table, rules)` → dict
+- `gene_sdk.transform_records(connection, source, target, mapping)` → dict
+- `gene_sdk.delete_records(connection, table, count)` → None
 
 **All kernels provide** (from the base `Kernel` ABC):
 - `gene_sdk.track_resource(resource_type, name)` — track a created resource
@@ -872,6 +867,14 @@ Peer fitness is only factored in when the peer has at least 10 total invocations
 | `sg recover` | Rebuild registry index from source files |
 | `sg new-plugin <name> [--output-dir DIR]` | Scaffold a new domain plugin |
 | `sg kernels` | List available kernels |
+| `sg daemon [--tick-interval N] [--max-ticks N] [--with-dashboard]` | Run continuous evolutionary loop |
+| `sg contracts proposals [locus]` | Show pending contract evolution proposals |
+| `sg contracts accept <locus> <index>` | Accept a contract proposal |
+| `sg contracts reject <locus> <index>` | Reject a contract proposal |
+| `sg speciation detect` | Detect speciation across organisms |
+| `sg speciation divergence` | Show divergence metrics between organisms |
+| `sg safety` | Show adaptive safety policy recommendations |
+| `sg loci` | Show cross-locus failure proposals for new loci |
 | `sg completions <bash\|zsh\|fish>` | Generate shell completions |
 
 ### Global Flags
@@ -906,9 +909,8 @@ Peer fitness is only factored in when the peer has at least 10 total invocations
 Kernels are discovered via Python entry points in the `sg.kernels` group. List available kernels with `sg kernels`.
 
 - **Stub kernel** (`--kernel stub`): Minimal no-op kernel. Always available.
-- **Network mock** (`--kernel network-mock`): In-memory network simulation. Requires `sg-network` plugin.
-- **Network production** (`--kernel production`): Real `ip link`, `bridge`, and sysfs operations. Requires Linux and sudo.
 - **Data mock** (`--kernel data-mock`): In-memory data pipeline simulation. Requires `sg-data` plugin.
+- **Data production** (`--kernel data-production`): Real database + HTTP operations. Requires `sg-data` plugin.
 
 Third-party plugins register additional kernels. See [PLUGIN-GUIDE.md](PLUGIN-GUIDE.md).
 

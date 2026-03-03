@@ -551,6 +551,423 @@ class InsertionOperator(PathwayMutationOperator):
         )
 
 
+# --- Conditional Wrapping Operator ---
+
+
+class ConditionalWrappingOperator(PathwayMutationOperator):
+    """Wrap a frequently-failing step in a conditional gate.
+
+    Signal: a step fails >40% of the time, and a diagnostic locus exists
+    whose output could serve as a precondition check. The operator inserts
+    the diagnostic before the failing step and makes the failing step
+    conditional on the diagnostic's output.
+    """
+
+    @property
+    def name(self) -> str:
+        return "conditional_wrapping"
+
+    def can_apply(self, ctx: PathwayMutationContext) -> bool:
+        for step in ctx.current_steps:
+            if step.step_type != "locus":
+                continue
+            fail_prob = ctx.failure_distribution.get(step.target, 0.0)
+            if fail_prob > 0.4:
+                if self._find_diagnostic_gate(step.target, ctx):
+                    return True
+        return False
+
+    def apply(self, ctx: PathwayMutationContext) -> PathwayMutationResult | None:
+        worst_idx, worst_step, worst_fail = None, None, 0.0
+        for i, step in enumerate(ctx.current_steps):
+            if step.step_type != "locus":
+                continue
+            fail_prob = ctx.failure_distribution.get(step.target, 0.0)
+            if fail_prob > worst_fail:
+                worst_fail = fail_prob
+                worst_idx = i
+                worst_step = step
+
+        if worst_step is None or worst_idx is None or worst_fail <= 0.4:
+            return None
+
+        diag_locus = self._find_diagnostic_gate(worst_step.target, ctx)
+        if not diag_locus:
+            return None
+
+        diag_step = StepSpec(step_type="locus", target=diag_locus)
+        conditional_step = StepSpec(
+            step_type="conditional",
+            target=worst_step.target,
+            params=worst_step.params,
+            condition_step_index=worst_idx,
+            condition_field="status",
+            branches={"ok": worst_step.to_dict()},
+        )
+
+        new_steps = list(ctx.current_steps)
+        new_steps[worst_idx] = diag_step
+        new_steps.insert(worst_idx + 1, conditional_step)
+        new_steps = _reindex_conditionals_after_insert(new_steps, worst_idx + 1)
+
+        return PathwayMutationResult(
+            new_steps=new_steps,
+            operator_name=self.name,
+            rationale=(
+                f"Wrapped '{worst_step.target}' (fail={worst_fail:.0%}) "
+                f"with diagnostic gate '{diag_locus}'"
+            ),
+        )
+
+    def _find_diagnostic_gate(
+        self, locus: str, ctx: PathwayMutationContext,
+    ) -> str | None:
+        """Find a diagnostic locus whose gives could gate the target."""
+        target_contract = ctx.contract_store.get_gene(locus)
+        if target_contract is None:
+            return None
+
+        best, best_fitness = None, -1.0
+        for other in ctx.available_loci:
+            if other == locus:
+                continue
+            other_contract = ctx.contract_store.get_gene(other)
+            if other_contract is None:
+                continue
+            if getattr(other_contract, "family", None) != "diagnostic":
+                continue
+            fitness = ctx.gene_fitness_map.get(other, 0.0)
+            if fitness > best_fitness:
+                best = other
+                best_fitness = fitness
+        return best
+
+
+class LoopIntroductionOperator(PathwayMutationOperator):
+    """Wrap steps in a retry loop when failures are transient.
+
+    Signal: a step fails intermittently (20-60% failure rate) but succeeds
+    on retry, indicated by input clusters where the same or similar inputs
+    sometimes succeed and sometimes fail.
+    """
+
+    @property
+    def name(self) -> str:
+        return "loop_introduction"
+
+    def can_apply(self, ctx: PathwayMutationContext) -> bool:
+        for step in ctx.current_steps:
+            if step.step_type != "locus":
+                continue
+            if step.loop_variable is not None:
+                continue
+            fail_prob = ctx.failure_distribution.get(step.target, 0.0)
+            gene_fit = ctx.per_step_fitness.get(step.target, 0.0)
+            if 0.2 <= fail_prob <= 0.6 and gene_fit > 0.5:
+                return True
+        return False
+
+    def apply(self, ctx: PathwayMutationContext) -> PathwayMutationResult | None:
+        best_idx, best_step, best_score = None, None, 0.0
+        for i, step in enumerate(ctx.current_steps):
+            if step.step_type != "locus" or step.loop_variable is not None:
+                continue
+            fail_prob = ctx.failure_distribution.get(step.target, 0.0)
+            gene_fit = ctx.per_step_fitness.get(step.target, 0.0)
+            if 0.2 <= fail_prob <= 0.6 and gene_fit > 0.5:
+                score = fail_prob * gene_fit
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+                    best_step = step
+
+        if best_step is None or best_idx is None:
+            return None
+
+        new_steps = list(ctx.current_steps)
+        new_steps[best_idx] = StepSpec(
+            step_type="loop",
+            target=best_step.target,
+            params=best_step.params,
+            loop_variable="attempt",
+            loop_iterable="[1, 2, 3]",
+        )
+        return PathwayMutationResult(
+            new_steps=new_steps,
+            operator_name=self.name,
+            rationale=(
+                f"Wrapped '{best_step.target}' in retry loop "
+                f"(fail={ctx.failure_distribution.get(best_step.target, 0):.0%}, "
+                f"gene_fitness={ctx.per_step_fitness.get(best_step.target, 0):.2f})"
+            ),
+        )
+
+
+class StepSplittingOperator(PathwayMutationOperator):
+    """Split a complex step into two sequential sub-loci.
+
+    Signal: a locus has high error diversity (many distinct error types),
+    suggesting it handles too many concerns. This works at the pathway level
+    by proposing that a new locus be created (via locus discovery) and the
+    original step be replaced by two steps in sequence.
+
+    Requires a mutation engine for LLM-assisted splitting proposals.
+    """
+
+    def __init__(self, mutation_engine: object) -> None:
+        self._engine = mutation_engine
+
+    @property
+    def name(self) -> str:
+        return "step_splitting"
+
+    def can_apply(self, ctx: PathwayMutationContext) -> bool:
+        for step in ctx.current_steps:
+            if step.step_type != "locus":
+                continue
+            fail_prob = ctx.failure_distribution.get(step.target, 0.0)
+            if fail_prob > 0.3 and len(ctx.input_clusters) >= 2:
+                return True
+        return False
+
+    def apply(self, ctx: PathwayMutationContext) -> PathwayMutationResult | None:
+        target_idx, target_step = None, None
+        max_fail = 0.0
+        for i, step in enumerate(ctx.current_steps):
+            if step.step_type != "locus":
+                continue
+            fail_prob = ctx.failure_distribution.get(step.target, 0.0)
+            if fail_prob > max_fail and fail_prob > 0.3:
+                max_fail = fail_prob
+                target_idx = i
+                target_step = step
+
+        if target_step is None or target_idx is None:
+            return None
+
+        try:
+            proposal = self._engine.propose_pathway_insertion(
+                pathway_name=ctx.pathway_name,
+                steps=[s.to_dict() for s in ctx.current_steps],
+                problem_step_index=target_idx,
+                problem_step_name=target_step.target,
+                failure_distribution=ctx.failure_distribution,
+                available_loci=ctx.available_loci,
+                input_clusters=[c.to_dict() for c in ctx.input_clusters],
+            )
+        except (NotImplementedError, Exception) as e:
+            logger.warning("LLM step-splitting proposal failed: %s", e)
+            return None
+
+        if proposal is None:
+            return None
+
+        split_locus = proposal.get("locus")
+        if split_locus is None or split_locus not in ctx.available_loci:
+            return None
+
+        prep_step = StepSpec(
+            step_type="locus",
+            target=split_locus,
+            params=proposal.get("params", {}),
+        )
+        new_steps = list(ctx.current_steps)
+        new_steps.insert(target_idx, prep_step)
+        new_steps = _reindex_conditionals_after_insert(new_steps, target_idx)
+
+        return PathwayMutationResult(
+            new_steps=new_steps,
+            operator_name=self.name,
+            rationale=(
+                f"Split '{target_step.target}' by inserting "
+                f"'{split_locus}' as preparation step"
+            ),
+        )
+
+
+class StepMergingOperator(PathwayMutationOperator):
+    """Merge adjacent steps that always succeed together.
+
+    Signal: two adjacent locus steps both have near-perfect fitness
+    (>0.95) and near-zero failure probability. If a composed pathway
+    or a fused gene exists that covers both, propose merging them
+    into a single composed step.
+    """
+
+    @property
+    def name(self) -> str:
+        return "step_merging"
+
+    def can_apply(self, ctx: PathwayMutationContext) -> bool:
+        return bool(self._find_mergeable_pairs(ctx))
+
+    def apply(self, ctx: PathwayMutationContext) -> PathwayMutationResult | None:
+        pairs = self._find_mergeable_pairs(ctx)
+        if not pairs:
+            return None
+        i, j = pairs[0]
+        step_a = ctx.current_steps[i]
+        step_b = ctx.current_steps[j]
+
+        composed_name = self._find_composed_pathway(
+            step_a.target, step_b.target, ctx,
+        )
+        if composed_name:
+            merged_step = StepSpec(step_type="composed", target=composed_name)
+        else:
+            merged_step = StepSpec(
+                step_type="composed",
+                target=f"{step_a.target}+{step_b.target}",
+                params={**step_a.params, **step_b.params},
+            )
+
+        new_steps = list(ctx.current_steps)
+        new_steps[i] = merged_step
+        del new_steps[j]
+        new_steps = _reindex_conditionals_after_delete(new_steps, j)
+
+        return PathwayMutationResult(
+            new_steps=new_steps,
+            operator_name=self.name,
+            rationale=(
+                f"Merged '{step_a.target}' + '{step_b.target}' "
+                f"into composed step"
+            ),
+        )
+
+    def _find_mergeable_pairs(
+        self, ctx: PathwayMutationContext,
+    ) -> list[tuple[int, int]]:
+        pairs = []
+        for i in range(len(ctx.current_steps) - 1):
+            a = ctx.current_steps[i]
+            b = ctx.current_steps[i + 1]
+            if a.step_type != "locus" or b.step_type != "locus":
+                continue
+            a_fail = ctx.failure_distribution.get(a.target, 0.0)
+            b_fail = ctx.failure_distribution.get(b.target, 0.0)
+            a_fit = ctx.per_step_fitness.get(a.target, 0.0)
+            b_fit = ctx.per_step_fitness.get(b.target, 0.0)
+            if a_fail < 0.02 and b_fail < 0.02 and a_fit > 0.95 and b_fit > 0.95:
+                pairs.append((i, i + 1))
+        return pairs
+
+    def _find_composed_pathway(
+        self, locus_a: str, locus_b: str, ctx: PathwayMutationContext,
+    ) -> str | None:
+        """Check if a pathway already composes these two loci in order."""
+        for pw_name in ctx.available_pathways:
+            pw_contract = ctx.contract_store.get(pw_name)
+            if pw_contract is None:
+                continue
+            steps = getattr(pw_contract, "steps", [])
+            targets = [
+                getattr(s, "locus", getattr(s, "target", None))
+                for s in steps
+            ]
+            if len(targets) == 2 and targets[0] == locus_a and targets[1] == locus_b:
+                return pw_name
+        return None
+
+
+class ParallelizationOperator(PathwayMutationOperator):
+    """Mark independent steps for parallel execution.
+
+    Signal: two or more non-adjacent steps have no data dependency between
+    them (no takes/gives overlap) and both contribute significant latency.
+    The operator groups them into a parallel step.
+    """
+
+    @property
+    def name(self) -> str:
+        return "parallelization"
+
+    def can_apply(self, ctx: PathwayMutationContext) -> bool:
+        return len(self._find_parallel_groups(ctx)) > 0
+
+    def apply(self, ctx: PathwayMutationContext) -> PathwayMutationResult | None:
+        groups = self._find_parallel_groups(ctx)
+        if not groups:
+            return None
+        group = groups[0]
+        indices = sorted(group)
+
+        parallel_step = StepSpec(
+            step_type="composed",
+            target="parallel:" + ",".join(
+                ctx.current_steps[i].target for i in indices
+            ),
+            params={"parallel": "true"},
+        )
+
+        new_steps = []
+        inserted = False
+        for i, step in enumerate(ctx.current_steps):
+            if i in indices:
+                if not inserted:
+                    new_steps.append(parallel_step)
+                    inserted = True
+            else:
+                new_steps.append(step)
+
+        return PathwayMutationResult(
+            new_steps=new_steps,
+            operator_name=self.name,
+            rationale=(
+                f"Parallelized {len(indices)} independent steps: "
+                + ", ".join(ctx.current_steps[i].target for i in indices)
+            ),
+        )
+
+    def _find_parallel_groups(
+        self, ctx: PathwayMutationContext,
+    ) -> list[list[int]]:
+        """Find groups of steps with no data dependency."""
+        locus_steps = [
+            (i, s) for i, s in enumerate(ctx.current_steps)
+            if s.step_type == "locus"
+        ]
+        if len(locus_steps) < 2:
+            return []
+
+        step_gives: dict[int, set[str]] = {}
+        step_takes: dict[int, set[str]] = {}
+        for i, step in locus_steps:
+            gc = ctx.contract_store.get_gene(step.target)
+            if gc:
+                step_gives[i] = {f.name for f in gc.gives} if gc.gives else set()
+                step_takes[i] = {
+                    f.name for f in gc.takes if f.required
+                } if gc.takes else set()
+            else:
+                step_gives[i] = set()
+                step_takes[i] = set()
+
+        def independent(a_idx: int, b_idx: int) -> bool:
+            a_g = step_gives.get(a_idx, set())
+            b_t = step_takes.get(b_idx, set())
+            b_g = step_gives.get(b_idx, set())
+            a_t = step_takes.get(a_idx, set())
+            return not (a_g & b_t) and not (b_g & a_t)
+
+        groups: list[list[int]] = []
+        used: set[int] = set()
+        for ia, (a_idx, _) in enumerate(locus_steps):
+            if a_idx in used:
+                continue
+            group = [a_idx]
+            for ib in range(ia + 1, len(locus_steps)):
+                b_idx = locus_steps[ib][0]
+                if b_idx in used:
+                    continue
+                if all(independent(b_idx, g) for g in group):
+                    group.append(b_idx)
+            if len(group) >= 2:
+                groups.append(group)
+                used.update(group)
+        return groups
+
+
 # --- Default operator ordering ---
 
 
@@ -559,13 +976,20 @@ def default_operators(
 ) -> list[PathwayMutationOperator]:
     """Return operators sorted by conservatism.
 
-    Order: reorder (cheapest) → substitution → deletion → insertion (LLM).
+    Order: reorder (cheapest) → substitution → deletion →
+    merging → conditional wrapping → loop introduction →
+    parallelization → insertion (LLM) → step splitting (LLM).
     """
     ops: list[PathwayMutationOperator] = [
         ReorderingOperator(),
         StepSubstitutionOperator(),
         DeletionOperator(),
+        StepMergingOperator(),
+        ConditionalWrappingOperator(),
+        LoopIntroductionOperator(),
+        ParallelizationOperator(),
     ]
     if mutation_engine is not None:
         ops.append(InsertionOperator(mutation_engine))
+        ops.append(StepSplittingOperator(mutation_engine))
     return ops

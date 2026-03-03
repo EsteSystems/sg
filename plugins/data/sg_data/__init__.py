@@ -8,10 +8,12 @@ from pathlib import Path
 
 from sg_data.kernel import DataKernel
 from sg_data.mock import MockDataKernel
+from sg_data.production import ProductionDataKernel
 
 __all__ = [
     "DataKernel",
     "MockDataKernel",
+    "ProductionDataKernel",
     "contracts_path",
     "genes_path",
     "fixtures_path",

@@ -40,6 +40,7 @@ def diff_phenotypes(
     new: PhenotypeMap,
     old_reg: Registry | None = None,
     new_reg: Registry | None = None,
+    meta_param_tracker=None,
 ) -> PhenotypeDiff:
     """Compare two phenotype maps. Optionally include fitness from registries."""
     diff = PhenotypeDiff()
@@ -50,7 +51,7 @@ def diff_phenotypes(
     # Added loci
     for locus in sorted(new_loci - old_loci):
         new_dom = new.get_dominant(locus)
-        fitness = _get_fitness(new_reg, new_dom) if new_dom else 0.0
+        fitness = _get_fitness(new_reg, new_dom, meta_param_tracker) if new_dom else 0.0
         diff.loci_changes.append(LocusDiff(
             locus=locus, change="added",
             new_dominant=new_dom[:12] if new_dom else None,
@@ -60,7 +61,7 @@ def diff_phenotypes(
     # Removed loci
     for locus in sorted(old_loci - new_loci):
         old_dom = old.get_dominant(locus)
-        fitness = _get_fitness(old_reg, old_dom) if old_dom else 0.0
+        fitness = _get_fitness(old_reg, old_dom, meta_param_tracker) if old_dom else 0.0
         diff.loci_changes.append(LocusDiff(
             locus=locus, change="removed",
             old_dominant=old_dom[:12] if old_dom else None,
@@ -79,8 +80,8 @@ def diff_phenotypes(
                 locus=locus, change="dominant_changed",
                 old_dominant=old_dom[:12] if old_dom else None,
                 new_dominant=new_dom[:12] if new_dom else None,
-                old_fitness=_get_fitness(old_reg, old_dom) if old_dom else 0.0,
-                new_fitness=_get_fitness(new_reg, new_dom) if new_dom else 0.0,
+                old_fitness=_get_fitness(old_reg, old_dom, meta_param_tracker) if old_dom else 0.0,
+                new_fitness=_get_fitness(new_reg, new_dom, meta_param_tracker) if new_dom else 0.0,
             ))
         elif old_stack != new_stack:
             diff.loci_changes.append(LocusDiff(
@@ -104,14 +105,15 @@ def diff_phenotypes(
     return diff
 
 
-def _get_fitness(reg: Registry | None, sha: str | None) -> float:
+def _get_fitness(reg: Registry | None, sha: str | None, meta_param_tracker=None) -> float:
     """Get fitness for an allele SHA, or 0.0 if unavailable."""
     if reg is None or sha is None:
         return 0.0
     allele = reg.get(sha)
     if allele is None:
         return 0.0
-    return round(arena.compute_fitness(allele), 3)
+    params = meta_param_tracker.get_params(allele.locus) if meta_param_tracker else None
+    return round(arena.compute_fitness(allele, params=params), 3)
 
 
 def format_diff(diff: PhenotypeDiff) -> str:

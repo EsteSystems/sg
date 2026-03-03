@@ -431,6 +431,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     pathway_fitness_tracker = PathwayFitnessTracker.open(root / "pathway_fitness.json")
     decomposition_detector = DecompositionDetector.open(root / ".sg" / "decomposition.json")
     pathway_registry = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+    from sg.meta_params import MetaParamTracker
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
 
     print("=== Software Genome Status ===\n")
 
@@ -446,8 +448,9 @@ def cmd_status(args: argparse.Namespace) -> None:
             if state.get("status") == "refined":
                 print(f"    Status: re-fused ({state['fused_sha'][:12]})")
         print(f"  Alleles ({len(alleles)}):")
+        params = meta_tracker.get_params(locus)
         for a in alleles:
-            fitness = arena.compute_fitness(a)
+            fitness = arena.compute_fitness(a, params=params)
             marker = " *" if a.sha256 == dominant_sha else ""
             print(f"    {a.sha256[:12]}  fitness={fitness:.3f}  "
                   f"invocations={a.total_invocations}  "
@@ -509,6 +512,8 @@ def cmd_lineage(args: argparse.Namespace) -> None:
     root = get_project_root()
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
+    from sg.meta_params import MetaParamTracker
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
 
     locus = args.locus
     if not locus:
@@ -521,6 +526,7 @@ def cmd_lineage(args: argparse.Namespace) -> None:
         return
 
     dominant_sha = phenotype.get_dominant(locus)
+    params = meta_tracker.get_params(locus)
 
     # Build parent→children map
     children: dict[str | None, list] = {}
@@ -533,7 +539,7 @@ def cmd_lineage(args: argparse.Namespace) -> None:
     print(f"=== Lineage: {locus} ({len(alleles)} allele(s)) ===\n")
 
     def _print_allele(a, indent=0):
-        fitness = arena.compute_fitness(a)
+        fitness = arena.compute_fitness(a, params=params)
         marker = " <-- dominant" if a.sha256 == dominant_sha else ""
         prefix = "  " * indent + ("├── " if indent > 0 else "")
         print(f"{prefix}{a.sha256[:12]}  gen={a.generation}  "
@@ -616,6 +622,8 @@ def cmd_compete(args: argparse.Namespace) -> None:
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
     kernel = make_kernel(args)
+    from sg.meta_params import MetaParamTracker
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
 
     locus = args.locus
     input_json = args.input
@@ -675,18 +683,19 @@ def cmd_compete(args: argparse.Namespace) -> None:
         marker = " *" if a.sha256 == dominant_sha else ""
         print(f"  {a.sha256[:12]}  {successes}/{rounds} passed  "
               f"trial_fitness={trial_fitness:.3f}  "
-              f"overall_fitness={arena.compute_fitness(a):.3f}  "
+              f"overall_fitness={arena.compute_fitness(a, params=meta_tracker.get_params(locus)):.3f}  "
               f"state={a.state}{marker}")
 
     # Check for promotions
     dominant = registry.get(dominant_sha)
+    params = meta_tracker.get_params(locus)
     promoted = False
     if dominant:
         dominant_result = results.get(dominant_sha)
         for sha, r in results.items():
             if sha == dominant_sha:
                 continue
-            if arena.should_promote(r["allele"], dominant):
+            if arena.should_promote(r["allele"], dominant, params=params):
                 print(f"\n  Promoting {sha[:12]} over {dominant_sha[:12]}!")
                 arena.set_dominant(r["allele"])
                 arena.set_recessive(dominant)
@@ -861,6 +870,8 @@ def cmd_share(args: argparse.Namespace) -> None:
     root = get_project_root()
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
+    from sg.meta_params import MetaParamTracker
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
 
     locus = args.locus
     dominant_sha = phenotype.get_dominant(locus)
@@ -868,7 +879,7 @@ def cmd_share(args: argparse.Namespace) -> None:
         print(f"No dominant allele for locus '{locus}'")
         return
 
-    allele_data = export_allele(registry, dominant_sha)
+    allele_data = export_allele(registry, dominant_sha, meta_param_tracker=meta_tracker)
     if allele_data is None:
         print(f"Could not export allele {dominant_sha[:12]}")
         return
@@ -1014,8 +1025,10 @@ def cmd_diff(args: argparse.Namespace) -> None:
     """Show diff between current genome and a snapshot."""
     from sg.snapshot import SnapshotManager
     from sg.diff import diff_phenotypes, format_diff
+    from sg.meta_params import MetaParamTracker
     root = get_project_root()
     mgr = SnapshotManager(root)
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
 
     current_pheno = PhenotypeMap.load(root / "phenotype.toml")
     current_reg = Registry.open(root / ".sg" / "registry")
@@ -1048,7 +1061,7 @@ def cmd_diff(args: argparse.Namespace) -> None:
         new_reg = current_reg
         print(f"Diff: {snap_name} -> current")
 
-    diff = diff_phenotypes(old_pheno, new_pheno, old_reg, new_reg)
+    diff = diff_phenotypes(old_pheno, new_pheno, old_reg, new_reg, meta_param_tracker=meta_tracker)
     print(format_diff(diff))
 
 
@@ -1097,19 +1110,23 @@ def cmd_pool(args: argparse.Namespace) -> None:
         registry = Registry.open(root / ".sg" / "registry")
         phenotype = PhenotypeMap.load(root / "phenotype.toml")
         contract_store = load_contract_store(root)
+        from sg.meta_params import MetaParamTracker
+        meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
         pool_name = args.pool
 
         if getattr(args, "all", False):
             pushed = 0
             for locus in contract_store.known_loci():
                 if client.push(locus, registry, phenotype, pool_name,
-                               contract_store=contract_store):
+                               contract_store=contract_store,
+                               meta_param_tracker=meta_tracker):
                     print(f"  pushed {locus}")
                     pushed += 1
             print(f"Pushed {pushed} allele(s) to '{pool_name}'")
         else:
             if client.push(args.locus, registry, phenotype, pool_name,
-                           contract_store=contract_store):
+                           contract_store=contract_store,
+                           meta_param_tracker=meta_tracker):
                 print(f"Pushed {args.locus} to '{pool_name}'")
             else:
                 print(f"Push failed for {args.locus} (not eligible or error)")
@@ -1276,6 +1293,12 @@ def cmd_daemon(args: argparse.Namespace) -> None:
     )
     daemon = Daemon(orch, event_bus=event_bus, config=config,
                     metrics_collector=metrics_collector)
+
+    if getattr(args, "with_dashboard", False):
+        dash_host = getattr(args, "dashboard_host", "127.0.0.1")
+        dash_port = getattr(args, "dashboard_port", 8420)
+        daemon.start_dashboard(host=dash_host, port=dash_port)
+
     daemon.start()
 
 
@@ -1516,6 +1539,12 @@ def main() -> None:
                                help="seconds between ticks (default: 60)")
     daemon_parser.add_argument("--max-ticks", type=int, default=None,
                                help="stop after N ticks (default: forever)")
+    daemon_parser.add_argument("--with-dashboard", action="store_true",
+                               help="start dashboard in-process (shares live metrics)")
+    daemon_parser.add_argument("--dashboard-host", default="127.0.0.1",
+                               help="dashboard bind address (default: 127.0.0.1)")
+    daemon_parser.add_argument("--dashboard-port", type=int, default=8420,
+                               help="dashboard port (default: 8420)")
 
     contracts_parser = subparsers.add_parser("contracts", help="manage contract evolution proposals")
     contracts_sub = contracts_parser.add_subparsers(dest="contracts_command")

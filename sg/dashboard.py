@@ -42,12 +42,14 @@ def _load_state():
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
     pathway_fitness = PathwayFitnessTracker.open(root / "pathway_fitness.json")
     pathway_registry = PathwayRegistry.open(root / ".sg" / "pathway_registry")
-    return contract_store, registry, phenotype, fusion_tracker, pathway_fitness, pathway_registry
+    from sg.meta_params import MetaParamTracker
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
+    return contract_store, registry, phenotype, fusion_tracker, pathway_fitness, pathway_registry, meta_tracker
 
 
 @app.get("/api/status")
 def api_status():
-    cs, reg, pheno, ft, _pft, _pr = _load_state()
+    cs, reg, pheno, ft, _pft, _pr, mpt = _load_state()
     allele_count = len(reg.alleles)
     loci_count = len(cs.known_loci())
     pathway_count = len(cs.known_pathways())
@@ -56,7 +58,7 @@ def api_status():
         1 for name in cs.known_pathways()
         if (f := pheno.get_fused(name)) and f.fused_sha
     )
-    fitnesses = [arena.compute_fitness(a) for a in reg.alleles.values()]
+    fitnesses = [arena.compute_fitness(a, params=mpt.get_params(a.locus)) for a in reg.alleles.values()]
     avg_fitness = sum(fitnesses) / len(fitnesses) if fitnesses else 0.0
     return {
         "loci_count": loci_count,
@@ -70,7 +72,7 @@ def api_status():
 
 @app.get("/api/loci")
 def api_loci():
-    cs, reg, pheno, _, _, _ = _load_state()
+    cs, reg, pheno, _, _, _, mpt = _load_state()
     result = []
     for locus in cs.known_loci():
         alleles = reg.alleles_for_locus(locus)
@@ -79,7 +81,7 @@ def api_loci():
         if dominant_sha:
             dom = reg.get(dominant_sha)
             if dom:
-                dominant_fitness = arena.compute_fitness(dom)
+                dominant_fitness = arena.compute_fitness(dom, params=mpt.get_params(locus))
         result.append({
             "name": locus,
             "dominant_sha": dominant_sha[:12] if dominant_sha else None,
@@ -91,9 +93,10 @@ def api_loci():
 
 @app.get("/api/locus/{name}")
 def api_locus(name: str):
-    cs, reg, pheno, _, _, _ = _load_state()
+    cs, reg, pheno, _, _, _, mpt = _load_state()
     alleles = reg.alleles_for_locus(name)
     dominant_sha = pheno.get_dominant(name)
+    params = mpt.get_params(name)
 
     allele_list = []
     for a in alleles:
@@ -101,7 +104,7 @@ def api_locus(name: str):
             "sha": a.sha256[:12],
             "sha_full": a.sha256,
             "generation": a.generation,
-            "fitness": round(arena.compute_fitness(a), 3),
+            "fitness": round(arena.compute_fitness(a, params=params), 3),
             "state": a.state,
             "successful_invocations": a.successful_invocations,
             "failed_invocations": a.failed_invocations,
@@ -125,7 +128,7 @@ def api_locus(name: str):
 
 @app.get("/api/pathways")
 def api_pathways():
-    cs, _, pheno, ft, pft, pr = _load_state()
+    cs, _, pheno, ft, pft, pr, _ = _load_state()
     result = []
     for name in cs.known_pathways():
         fusion = pheno.get_fused(name)
@@ -152,7 +155,7 @@ def api_pathways():
 
 @app.get("/api/allele/{sha}/source")
 def api_allele_source(sha: str):
-    _, reg, _, _, _, _ = _load_state()
+    _, reg, _, _, _, _, _ = _load_state()
     # Try exact match first, then prefix
     source = reg.load_source(sha)
     if source is None:
@@ -168,7 +171,7 @@ def api_allele_source(sha: str):
 @app.get("/api/lineage/{sha}")
 def api_lineage(sha: str):
     """Return the lineage chain for an allele (child → parent → ...)."""
-    _, reg, _, _, _, _ = _load_state()
+    _, reg, _, _, _, _, mpt = _load_state()
     # Resolve prefix
     full_sha = sha
     if sha not in reg.alleles:
@@ -190,7 +193,7 @@ def api_lineage(sha: str):
             "sha_full": allele.sha256,
             "locus": allele.locus,
             "generation": allele.generation,
-            "fitness": round(arena.compute_fitness(allele), 3),
+            "fitness": round(arena.compute_fitness(allele, params=mpt.get_params(allele.locus)), 3),
             "state": allele.state,
         })
         current = allele.parent_sha
@@ -220,7 +223,7 @@ def api_regression():
 @app.get("/api/pathway/{name}/fitness")
 def api_pathway_fitness(name: str):
     """Return detailed pathway fitness data."""
-    _, _, _, _, pft, _ = _load_state()
+    _, _, _, _, pft, _, _ = _load_state()
     rec = pft.get_record(name)
     if rec is None:
         return {"pathway": name, "fitness": 0.0, "executions": 0}
@@ -244,7 +247,7 @@ def api_pathway_fitness(name: str):
 @app.get("/api/pathway/{name}/lineage")
 def api_pathway_lineage(name: str):
     """Return pathway allele lineage."""
-    _, _, pheno, _, _, pr = _load_state()
+    _, _, pheno, _, _, pr, _ = _load_state()
     from sg.pathway_arena import compute_pathway_fitness
     alleles = pr.get_for_pathway(name)
     dominant_sha = pheno.get_pathway_dominant(name)
@@ -298,7 +301,7 @@ async def api_events():
 async def federation_receive(request: Request):
     """Accept an allele from a peer with integrity verification."""
     data = await request.json()
-    _, reg, pheno, _, _, _ = _load_state()
+    _, reg, pheno, _, _, _, _ = _load_state()
     from sg.federation import import_allele, verify_allele_integrity
     if not verify_allele_integrity(data):
         return JSONResponse({"error": "integrity check failed"}, status_code=400)
@@ -320,7 +323,7 @@ async def federation_receive(request: Request):
 async def federation_fitness(request: Request):
     """Accept fitness observations from a peer for an allele."""
     data = await request.json()
-    _, reg, _, _, _, _ = _load_state()
+    _, reg, _, _, _, _, _ = _load_state()
     sha = data.get("sha256", "")
     peer_name = data.get("peer", "unknown")
 
@@ -344,12 +347,12 @@ async def federation_fitness(request: Request):
 @app.get("/api/federation/alleles/{locus}")
 def federation_alleles(locus: str):
     """Serve alleles for a locus to a peer."""
-    _, reg, _, _, _, _ = _load_state()
+    _, reg, _, _, _, _, mpt = _load_state()
     from sg.federation import export_allele
     alleles = reg.alleles_for_locus(locus)
     result = []
     for a in alleles[:5]:  # limit to top 5 by fitness
-        data = export_allele(reg, a.sha256)
+        data = export_allele(reg, a.sha256, meta_param_tracker=mpt)
         if data:
             result.append(data)
     return {"alleles": result}

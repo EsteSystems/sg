@@ -45,6 +45,25 @@ class Daemon:
     def tick_count(self) -> int:
         return self._tick_count
 
+    def start_dashboard(self, host: str = "127.0.0.1", port: int = 8420) -> None:
+        """Start the web dashboard in a background thread with shared metrics."""
+        try:
+            import sg.dashboard as dash
+            import uvicorn
+            import threading
+        except ImportError:
+            logger.warning("dashboard extras not installed, skipping --with-dashboard")
+            return
+        dash._project_root = self.orchestrator.project_root
+        dash._metrics_collector = self.metrics_collector
+
+        def _serve():
+            uvicorn.run(dash.app, host=host, port=port, log_level="warning")
+
+        t = threading.Thread(target=_serve, daemon=True, name="sg-dashboard")
+        t.start()
+        logger.info("dashboard started at http://%s:%d (in-process)", host, port)
+
     def start(self) -> None:
         """Start the daemon loop.  Blocks until stop() or max_ticks."""
         self._running = True
@@ -119,6 +138,7 @@ class Daemon:
                     organism_id,
                     self.orchestrator.phenotype,
                     self.orchestrator.registry,
+                    meta_param_tracker=self.orchestrator._meta_param_tracker,
                 )
             except Exception:
                 logger.debug("speciation snapshot failed", exc_info=True)

@@ -657,7 +657,7 @@ class Orchestrator:
         allele = self.registry.get(sha)
         if allele is None:
             return
-        severity = self.regression_detector.record(allele)
+        severity = self.regression_detector.record(allele, meta_param_tracker=self._meta_param_tracker)
         self.regression_detector.save(self._regression_path)
         if severity == "severe":
             arena.set_deprecated(allele)

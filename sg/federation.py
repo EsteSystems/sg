@@ -56,7 +56,7 @@ def verify_signature(payload: dict, signature: str, secret: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def export_allele(registry: Registry, sha: str) -> dict | None:
+def export_allele(registry: Registry, sha: str, meta_param_tracker=None) -> dict | None:
     """Package an allele for sharing: metadata + source + integrity hash."""
     allele = registry.get(sha)
     if allele is None:
@@ -64,13 +64,14 @@ def export_allele(registry: Registry, sha: str) -> dict | None:
     source = registry.load_source(sha)
     if source is None:
         return None
+    params = meta_param_tracker.get_params(allele.locus) if meta_param_tracker else None
     return {
         "sha256": allele.sha256,
         "locus": allele.locus,
         "generation": allele.generation,
         "source": source,
         "source_sha256": compute_source_sha(source),
-        "fitness": arena.compute_fitness(allele),
+        "fitness": arena.compute_fitness(allele, params=params),
         "successful_invocations": allele.successful_invocations,
         "total_invocations": allele.total_invocations,
     }

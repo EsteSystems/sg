@@ -75,6 +75,7 @@ class SpeciationTracker:
 
     def record_snapshot(
         self, organism_id: str, phenotype, registry,
+        meta_param_tracker=None,
     ) -> None:
         """Record a snapshot of an organism's current dominant alleles."""
         from sg import arena
@@ -86,7 +87,8 @@ class SpeciationTracker:
                 dominant_alleles[locus_name] = config.dominant
                 allele = registry.get(config.dominant)
                 if allele:
-                    fitness_summary[locus_name] = arena.compute_fitness(allele)
+                    params = meta_param_tracker.get_params(locus_name) if meta_param_tracker else None
+                    fitness_summary[locus_name] = arena.compute_fitness(allele, params=params)
 
         snap = OrganismSnapshot(
             organism_id=organism_id,

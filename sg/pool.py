@@ -125,6 +125,7 @@ def is_push_eligible(
     allele: AlleleMetadata,
     min_fitness: float = DEFAULT_MIN_FITNESS,
     min_invocations: int = DEFAULT_MIN_INVOCATIONS,
+    params=None,
 ) -> bool:
     """Check if an allele is eligible for pool push.
 
@@ -135,7 +136,7 @@ def is_push_eligible(
     """
     if allele.total_invocations < min_invocations:
         return False
-    fitness = arena.compute_fitness(allele)
+    fitness = arena.compute_fitness(allele, params=params)
     if fitness < min_fitness:
         return False
     if allele.state in ("deprecated",):
@@ -176,6 +177,7 @@ class PoolClient:
         phenotype: PhenotypeMap,
         pool_name: str,
         contract_store: Any = None,
+        meta_param_tracker=None,
     ) -> bool:
         """Push the dominant allele for a locus to a pool.
 
@@ -193,7 +195,8 @@ class PoolClient:
         if allele is None:
             return False
 
-        if not is_push_eligible(allele):
+        params = meta_param_tracker.get_params(locus) if meta_param_tracker else None
+        if not is_push_eligible(allele, params=params):
             return False
 
         source = registry.load_source(dominant_sha)
@@ -205,7 +208,7 @@ class PoolClient:
             "sha256": allele.sha256,
             "source": source,
             "generation": allele.generation,
-            "fitness": arena.compute_fitness(allele),
+            "fitness": arena.compute_fitness(allele, params=params),
             "successful_invocations": allele.successful_invocations,
             "total_invocations": allele.total_invocations,
         }

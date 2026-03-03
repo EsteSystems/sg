@@ -52,13 +52,14 @@ class RegressionDetector:
         self.threshold = threshold
         self.history: dict[str, FitnessHistory] = {}
 
-    def record(self, allele: AlleleMetadata) -> str | None:
+    def record(self, allele: AlleleMetadata, meta_param_tracker=None) -> str | None:
         """Record current fitness, return regression severity if detected.
 
         Returns: None (no regression), "mild", or "severe".
         """
         sha = allele.sha256
-        fitness = arena.compute_fitness(allele)
+        params = meta_param_tracker.get_params(allele.locus) if meta_param_tracker else None
+        fitness = arena.compute_fitness(allele, params=params)
 
         if sha not in self.history:
             self.history[sha] = FitnessHistory()

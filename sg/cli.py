@@ -43,6 +43,9 @@ def make_mutation_engine(
     if engine == "mock":
         return MockMutationEngine(project_root / "fixtures")
 
+    from sg.mutation_cache import MutationCache
+    cache = MutationCache(project_root / ".sg" / "mutation_cache")
+
     extra = {}
     if model:
         extra["model"] = model
@@ -55,7 +58,7 @@ def make_mutation_engine(
             print("error: --mutation-engine=claude requires ANTHROPIC_API_KEY", file=sys.stderr)
             sys.exit(1)
         from sg.mutation import ClaudeMutationEngine
-        return ClaudeMutationEngine(api_key, contract_store, **extra)
+        return ClaudeMutationEngine(api_key, contract_store, cache=cache, **extra)
 
     if engine == "openai":
         api_key = os.environ.get("OPENAI_API_KEY")
@@ -63,7 +66,7 @@ def make_mutation_engine(
             print("error: --mutation-engine=openai requires OPENAI_API_KEY", file=sys.stderr)
             sys.exit(1)
         from sg.mutation import OpenAIMutationEngine
-        return OpenAIMutationEngine(api_key, contract_store, **extra)
+        return OpenAIMutationEngine(api_key, contract_store, cache=cache, **extra)
 
     if engine == "deepseek":
         api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -71,7 +74,7 @@ def make_mutation_engine(
             print("error: --mutation-engine=deepseek requires DEEPSEEK_API_KEY", file=sys.stderr)
             sys.exit(1)
         from sg.mutation import DeepSeekMutationEngine
-        return DeepSeekMutationEngine(api_key, contract_store, **extra)
+        return DeepSeekMutationEngine(api_key, contract_store, cache=cache, **extra)
 
     # auto: try Claude, OpenAI, DeepSeek, fall back to mock
     for env_var, engine_cls_name in [
@@ -83,7 +86,7 @@ def make_mutation_engine(
         if api_key:
             import sg.mutation as mut
             engine_cls = getattr(mut, engine_cls_name)
-            return engine_cls(api_key, contract_store, **extra)
+            return engine_cls(api_key, contract_store, cache=cache, **extra)
 
     return MockMutationEngine(project_root / "fixtures")
 
@@ -111,6 +114,8 @@ def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
     kernel = make_kernel(args)
     mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
     pathway_registry = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+    from sg.meta_params import MetaParamTracker
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
 
     return Orchestrator(
         registry=registry,
@@ -122,6 +127,7 @@ def make_orchestrator(args: argparse.Namespace) -> Orchestrator:
         project_root=root,
         pathway_fitness_tracker=pathway_fitness_tracker,
         pathway_registry=pathway_registry,
+        meta_param_tracker=meta_tracker,
     )
 
 

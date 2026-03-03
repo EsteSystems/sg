@@ -86,7 +86,8 @@ class Orchestrator:
         self._pathway_mutation_throttle._stabilization_tracker = self._stabilization_tracker
         from sg.failure_discovery import FailureDiscovery
         self._failure_discovery = FailureDiscovery.open(
-            project_root / ".sg" / "failure_discovery.json"
+            project_root / ".sg" / "failure_discovery.json",
+            mutation_engine=mutation_engine,
         )
         self._contract_evolution = ContractEvolution.open(
             project_root / ".sg" / "contract_evolution.json"
@@ -566,6 +567,8 @@ class Orchestrator:
             self._contract_evolution.record_config_fitness(
                 target_locus, fitness, contract_store=self.contract_store,
             )
+            from sg.events import fitness_feedback
+            self._publish(fitness_feedback(locus, target_locus, timescale, healthy))
             logger.info("feedback %s -> %s (%s: %s, fitness: %.2f)",
                         locus, target_locus, timescale,
                         "healthy" if healthy else "unhealthy", fitness,
@@ -811,6 +814,8 @@ class Orchestrator:
         # Attempt pathway mutation before giving up
         self._try_pathway_mutation(pathway_name, default_pathway)
 
+        from sg.events import pathway_failed
+        self._publish(pathway_failed(pathway_name, last_error))
         raise RuntimeError(
             f"pathway '{pathway_name}' failed: all pathway alleles exhausted"
         )
@@ -1067,6 +1072,9 @@ class Orchestrator:
                 logger.info("pathway mutation blocked: stabilization in progress for '%s'",
                             pathway_name)
                 return None
+            if status == "stabilized":
+                from sg.events import stabilization_complete
+                self._publish(stabilization_complete(pathway_name))
             if status == "timed_out":
                 self._consider_pathway_revert(pathway_name)
         if not self._pathway_mutation_throttle.can_mutate(pathway_name):

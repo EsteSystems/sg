@@ -107,7 +107,7 @@ class Daemon:
                 logger.debug("failed to save metrics snapshot", exc_info=True)
 
     def _run_health_checks(self) -> None:
-        """Run diagnostic pathways and periodic snapshots."""
+        """Periodic health tasks: speciation snapshots."""
         logger.debug("running health checks (tick %d)", self._tick_count)
         # Record speciation snapshot periodically
         if (self._tick_count % 50 == 0

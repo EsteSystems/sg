@@ -226,8 +226,8 @@ def cmd_init(args: argparse.Namespace) -> None:
         pathway_contract = contract_store.get_pathway(pw_name)
         if pathway_contract is None:
             continue
-        from sg.pathway import build_pathway
-        pathway = build_pathway(pathway_contract, contract_store)
+        from sg.pathway import pathway_from_contract
+        pathway = pathway_from_contract(pathway_contract)
         steps = steps_from_pathway(pathway)
         sha = pathway_reg.register(pw_name, steps)
         pw_allele = pathway_reg.get(sha)

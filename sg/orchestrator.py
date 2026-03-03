@@ -50,6 +50,8 @@ class Orchestrator:
         audit_log: AuditLog | None = None,
         pathway_fitness_tracker: PathwayFitnessTracker | None = None,
         pathway_registry: PathwayRegistry | None = None,
+        topology_registry=None,
+        meta_param_tracker=None,
     ):
         self.registry = registry
         self.phenotype = phenotype
@@ -61,6 +63,8 @@ class Orchestrator:
         self.audit_log = audit_log
         self.pathway_fitness_tracker = pathway_fitness_tracker
         self.pathway_registry = pathway_registry
+        self.topology_registry = topology_registry
+        self._meta_param_tracker = meta_param_tracker
         self.verify_scheduler = VerifyScheduler()
         self._regression_path = project_root / ".sg" / "regression.json"
         self.regression_detector = RegressionDetector.open(self._regression_path)
@@ -450,6 +454,12 @@ class Orchestrator:
                         extra={"locus": locus, "sha": sha[:12], "event": "promotion"})
             self._audit("promotion", locus=locus, sha=sha,
                         fitness=arena.compute_fitness(allele))
+            if self._meta_param_tracker is not None:
+                self._meta_param_tracker.record_snapshot(
+                    entity_name=locus, entity_type="gene",
+                    outcome_fitness=arena.compute_fitness(allele),
+                    allele_sha=sha, allele_survived=True,
+                )
 
     def _test_promotion_interactions(self, locus: str, sha: str) -> list:
         """Test an allele against cross-locus pathways before promotion."""
@@ -568,6 +578,12 @@ class Orchestrator:
                         sha[:12], locus,
                         extra={"locus": locus, "sha": sha[:12], "event": "demotion"})
             self._audit("demotion", locus=locus, sha=sha)
+            if self._meta_param_tracker is not None:
+                self._meta_param_tracker.record_snapshot(
+                    entity_name=locus, entity_type="gene",
+                    outcome_fitness=arena.compute_fitness(allele),
+                    allele_sha=sha, allele_survived=False,
+                )
 
     def _check_regression(self, locus: str, sha: str, input_json: str) -> None:
         """Check for fitness regression and respond proactively."""
@@ -856,6 +872,12 @@ class Orchestrator:
                                "event": "pathway_promotion"})
             self._audit("pathway_promotion", locus=pathway_name, sha=sha,
                         fitness=pathway_arena.compute_pathway_fitness(allele))
+            if self._meta_param_tracker is not None:
+                self._meta_param_tracker.record_snapshot(
+                    entity_name=pathway_name, entity_type="pathway",
+                    outcome_fitness=pathway_arena.compute_pathway_fitness(allele),
+                    allele_sha=sha, allele_survived=True,
+                )
 
     def _check_pathway_demotion(self, pathway_name: str, sha: str) -> None:
         if self.pathway_registry is None:
@@ -868,6 +890,12 @@ class Orchestrator:
                         extra={"pathway": pathway_name, "sha": sha[:12],
                                "event": "pathway_demotion"})
             self._audit("pathway_demotion", locus=pathway_name, sha=sha)
+            if self._meta_param_tracker is not None:
+                self._meta_param_tracker.record_snapshot(
+                    entity_name=pathway_name, entity_type="pathway",
+                    outcome_fitness=pathway_arena.compute_pathway_fitness(allele),
+                    allele_sha=sha, allele_survived=False,
+                )
 
     def _pathway_loci(self, pathway_name: str) -> list[str]:
         """Extract gene locus names from a pathway contract's steps."""
@@ -1088,20 +1116,130 @@ class Orchestrator:
                              resource_type, name, e)
 
     def run_topology(self, topology_name: str, input_json: str) -> list[str]:
-        """Execute a named topology by decomposing into pathway/gene calls."""
-        from sg.topology import execute_topology
+        """Execute a named topology with allele stack support."""
+        from sg.topology import decompose, execute_topology
 
         topology = self.contract_store.get_topology(topology_name)
         if topology is None:
             raise ValueError(f"unknown topology: {topology_name}")
 
-        logger.info("Deploying topology: %s", topology_name)
-        outputs = execute_topology(
-            topology, input_json, self, self.kernel.resource_mappers()
+        resource_mappers = self.kernel.resource_mappers()
+
+        # Register structural allele if topology registry is active
+        if self.topology_registry is not None:
+            from sg.topology_registry import steps_from_decomposition
+            raw_steps = decompose(topology, input_json, resource_mappers)
+            step_specs = steps_from_decomposition(raw_steps)
+            sha = self.topology_registry.register(topology_name, step_specs)
+            if not self.phenotype.get_topology_stack(topology_name):
+                self.phenotype.add_topology_fallback(topology_name, sha)
+                self.phenotype.promote_topology(topology_name, sha)
+                topo_allele = self.topology_registry.get(sha)
+                if topo_allele:
+                    topo_allele.state = "dominant"
+
+        # Use topology allele stack if registry active
+        allele_stack = (
+            self.phenotype.get_topology_stack(topology_name)
+            if self.topology_registry else []
         )
+        if allele_stack and self.topology_registry:
+            return self._execute_topology_allele_stack(
+                topology_name, input_json, allele_stack, topology,
+            )
+
+        logger.info("Deploying topology: %s", topology_name)
+        outputs = execute_topology(topology, input_json, self, resource_mappers)
         logger.info("Topology '%s' deployed (%d output(s))",
                     topology_name, len(outputs))
         return outputs
+
+    def _execute_topology_allele_stack(
+        self,
+        topology_name: str,
+        input_json: str,
+        allele_stack: list[str],
+        topology,
+    ) -> list[str]:
+        """Try each topology allele in the stack, recording success/failure."""
+        from sg.topology import execute_topology
+        from sg import topology_arena
+
+        last_error = ""
+        for sha in allele_stack:
+            topo_allele = self.topology_registry.get(sha)
+            if topo_allele is None or topo_allele.state == "deprecated":
+                continue
+            try:
+                outputs = execute_topology(
+                    topology, input_json, self, self.kernel.resource_mappers(),
+                )
+                topology_arena.record_topology_success(topo_allele)
+                self._check_topology_promotion(topology_name, sha)
+                logger.info("Topology '%s' deployed via allele %s (%d output(s))",
+                            topology_name, sha[:12], len(outputs))
+                return outputs
+            except RuntimeError as e:
+                last_error = str(e)
+                topology_arena.record_topology_failure(topo_allele)
+                self._check_topology_demotion(topology_name, sha)
+                logger.warning(
+                    "topology allele %s failed for '%s': %s",
+                    sha[:12], topology_name, e,
+                    extra={"topology": topology_name, "sha": sha[:12]},
+                )
+                continue
+        raise RuntimeError(
+            f"topology '{topology_name}' failed: all topology alleles exhausted"
+            + (f" (last error: {last_error})" if last_error else "")
+        )
+
+    def _check_topology_promotion(self, topology_name: str, sha: str) -> None:
+        if self.topology_registry is None:
+            return
+        from sg import topology_arena
+        allele = self.topology_registry.get(sha)
+        dominant_sha = self.phenotype.get_topology_dominant(topology_name)
+        dominant = (
+            self.topology_registry.get(dominant_sha)
+            if dominant_sha else None
+        )
+        if allele and topology_arena.should_promote_topology(allele, dominant):
+            topology_arena.set_topology_dominant(allele)
+            if dominant:
+                topology_arena.set_topology_recessive(dominant)
+            self.phenotype.promote_topology(topology_name, sha)
+            logger.info("promoted topology allele %s for %s",
+                        sha[:12], topology_name,
+                        extra={"topology": topology_name, "sha": sha[:12],
+                               "event": "topology_promotion"})
+            self._audit("topology_promotion", locus=topology_name, sha=sha,
+                        fitness=topology_arena.compute_topology_fitness(allele))
+            if self._meta_param_tracker is not None:
+                self._meta_param_tracker.record_snapshot(
+                    entity_name=topology_name, entity_type="topology",
+                    outcome_fitness=topology_arena.compute_topology_fitness(allele),
+                    allele_sha=sha, allele_survived=True,
+                )
+
+    def _check_topology_demotion(self, topology_name: str, sha: str) -> None:
+        if self.topology_registry is None:
+            return
+        from sg import topology_arena
+        allele = self.topology_registry.get(sha)
+        if allele and topology_arena.should_demote_topology(allele):
+            topology_arena.set_topology_deprecated(allele)
+            logger.info("demoted topology allele %s for %s",
+                        sha[:12], topology_name,
+                        extra={"topology": topology_name, "sha": sha[:12],
+                               "event": "topology_demotion"})
+            self._audit("topology_demotion", locus=topology_name, sha=sha)
+            if self._meta_param_tracker is not None:
+                self._meta_param_tracker.record_snapshot(
+                    entity_name=topology_name, entity_type="topology",
+                    outcome_fitness=topology_arena.compute_topology_fitness(allele),
+                    allele_sha=sha, allele_survived=False,
+                )
 
     def save_state(self) -> None:
         self.registry.save_index()
@@ -1126,3 +1264,9 @@ class Orchestrator:
         self._failure_discovery.save(
             self.project_root / ".sg" / "failure_discovery.json"
         )
+        if self.topology_registry is not None:
+            self.topology_registry.save_index()
+        if self._meta_param_tracker is not None:
+            self._meta_param_tracker.save(
+                self.project_root / ".sg" / "meta_params.json"
+            )

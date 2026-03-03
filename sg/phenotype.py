@@ -38,6 +38,12 @@ class PathwayAlleleConfig:
     fallback: list[str] = field(default_factory=list)
 
 
+@dataclass
+class TopologyAlleleConfig:
+    dominant: str | None = None
+    fallback: list[str] = field(default_factory=list)
+
+
 class PhenotypeMap:
     """In-memory representation of the phenotype TOML."""
 
@@ -45,6 +51,7 @@ class PhenotypeMap:
         self.loci: dict[str, LocusConfig] = {}
         self.pathway_fusions: dict[str, PathwayFusionConfig] = {}
         self.pathway_alleles: dict[str, PathwayAlleleConfig] = {}
+        self.topology_alleles: dict[str, TopologyAlleleConfig] = {}
 
     def ensure_locus(self, locus: str) -> LocusConfig:
         if locus not in self.loci:
@@ -137,6 +144,43 @@ class PhenotypeMap:
         config = self.pathway_alleles.get(pathway_name)
         return config.dominant if config else None
 
+    # --- Topology alleles ---
+
+    def ensure_topology_allele(self, topology_name: str) -> TopologyAlleleConfig:
+        if topology_name not in self.topology_alleles:
+            self.topology_alleles[topology_name] = TopologyAlleleConfig()
+        return self.topology_alleles[topology_name]
+
+    def promote_topology(self, topology_name: str, sha: str) -> None:
+        """Set sha as dominant topology allele. Old dominant goes to fallback head."""
+        config = self.ensure_topology_allele(topology_name)
+        if config.dominant is not None and config.dominant != sha:
+            if config.dominant not in config.fallback:
+                config.fallback.insert(0, config.dominant)
+        config.dominant = sha
+        if sha in config.fallback:
+            config.fallback.remove(sha)
+
+    def add_topology_fallback(self, topology_name: str, sha: str) -> None:
+        config = self.ensure_topology_allele(topology_name)
+        if sha != config.dominant and sha not in config.fallback:
+            config.fallback.append(sha)
+
+    def get_topology_stack(self, topology_name: str) -> list[str]:
+        """Return [dominant, ...fallback] topology allele SHAs."""
+        config = self.topology_alleles.get(topology_name)
+        if config is None:
+            return []
+        stack = []
+        if config.dominant:
+            stack.append(config.dominant)
+        stack.extend(config.fallback)
+        return stack
+
+    def get_topology_dominant(self, topology_name: str) -> str | None:
+        config = self.topology_alleles.get(topology_name)
+        return config.dominant if config else None
+
     # --- Persistence ---
 
     def save(self, path: Path) -> None:
@@ -165,6 +209,14 @@ class PhenotypeMap:
             if config.fallback:
                 entry["fallback"] = config.fallback
             data["pathway_allele"][key] = entry
+        data["topology_allele"] = {}
+        for key, config in self.topology_alleles.items():
+            entry = {}
+            if config.dominant:
+                entry["dominant"] = config.dominant
+            if config.fallback:
+                entry["fallback"] = config.fallback
+            data["topology_allele"][key] = entry
         with file_lock(path):
             path.write_bytes(tomli_w.dumps(data).encode())
 
@@ -188,6 +240,11 @@ class PhenotypeMap:
             )
         for key, entry in data.get("pathway_allele", {}).items():
             pm.pathway_alleles[key] = PathwayAlleleConfig(
+                dominant=entry.get("dominant"),
+                fallback=entry.get("fallback", []),
+            )
+        for key, entry in data.get("topology_allele", {}).items():
+            pm.topology_alleles[key] = TopologyAlleleConfig(
                 dominant=entry.get("dominant"),
                 fallback=entry.get("fallback", []),
             )

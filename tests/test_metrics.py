@@ -107,3 +107,29 @@ class TestMetricsCollector:
         assert mc.sg_last_tick_duration_ms.value == 100.0
         bus.publish(tick_complete(2, 50.0))
         assert mc.sg_last_tick_duration_ms.value == 50.0
+
+    def test_save_and_load_round_trip(self, tmp_path):
+        """Metrics survive save/load cycle."""
+        mc = MetricsCollector()
+        mc.sg_promotions_total.inc(3)
+        mc.sg_avg_fitness.set(0.75)
+        mc.sg_daemon_ticks_total.inc(10)
+
+        path = tmp_path / "metrics.json"
+        mc.save(path)
+
+        loaded = MetricsCollector.load(path)
+        assert loaded is not None
+        assert loaded.sg_promotions_total.value == 3.0
+        assert loaded.sg_avg_fitness.value == 0.75
+        assert loaded.sg_daemon_ticks_total.value == 10.0
+
+    def test_load_missing_returns_none(self, tmp_path):
+        """Loading from a nonexistent path returns None."""
+        assert MetricsCollector.load(tmp_path / "nope.json") is None
+
+    def test_load_corrupt_returns_none(self, tmp_path):
+        """Loading from a corrupt file returns None."""
+        bad = tmp_path / "bad.json"
+        bad.write_text("not json at all")
+        assert MetricsCollector.load(bad) is None

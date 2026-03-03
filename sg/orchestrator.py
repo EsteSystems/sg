@@ -99,6 +99,12 @@ class Orchestrator:
             project_root / ".sg" / "speciation.json"
         )
 
+    def _get_params(self, locus: str):
+        """Return EvolutionaryParams for a locus, or None."""
+        if self._meta_param_tracker is not None:
+            return self._meta_param_tracker.get_params(locus)
+        return None
+
     def close(self) -> None:
         """Shut down background tasks and save state."""
         self.verify_scheduler.cancel_all()
@@ -183,7 +189,7 @@ class Orchestrator:
                 self._contract_evolution.record_output(
                     locus, result, gene_contract)
                 logger.info("success via %s (fitness: %.2f)",
-                            sha[:12], arena.compute_fitness(allele),
+                            sha[:12], arena.compute_fitness(allele, params=self._get_params(locus)),
                             extra={"locus": locus, "sha": sha[:12]})
                 return (result, sha)
 
@@ -239,6 +245,7 @@ class Orchestrator:
     def _build_prior_mutations(self, locus: str) -> list[str]:
         """Summarize recent alleles at a locus for mutation context."""
         alleles = self.registry.alleles_for_locus(locus)
+        params = self._get_params(locus)
         summaries = []
         for allele in alleles[:3]:
             source = self.registry.load_source(allele.sha256)
@@ -249,7 +256,7 @@ class Orchestrator:
                     if stripped and not stripped.startswith("#"):
                         first_line = stripped[:80]
                         break
-            fitness = arena.compute_fitness(allele)
+            fitness = arena.compute_fitness(allele, params=params)
             summaries.append(
                 f"gen{allele.generation} ({allele.sha256[:8]}): "
                 f"fitness={fitness:.2f}, "
@@ -263,11 +270,12 @@ class Orchestrator:
     ) -> list[str]:
         """Brief descriptions of other alleles at a locus."""
         alleles = self.registry.alleles_for_locus(locus)
+        params = self._get_params(locus)
         summaries = []
         for allele in alleles[:5]:
             if allele.sha256 == exclude_sha:
                 continue
-            fitness = arena.compute_fitness(allele)
+            fitness = arena.compute_fitness(allele, params=params)
             summaries.append(
                 f"{allele.sha256[:8]}: state={allele.state}, "
                 f"fitness={fitness:.2f}, "
@@ -472,9 +480,7 @@ class Orchestrator:
         dominant_sha = self.phenotype.get_dominant(locus)
         dominant = self.registry.get(dominant_sha) if dominant_sha else None
 
-        params = None
-        if self._meta_param_tracker is not None:
-            params = self._meta_param_tracker.get_params(locus)
+        params = self._get_params(locus)
         if allele and arena.should_promote(allele, dominant, params=params):
             # Test cross-locus interactions before promoting
             interaction_failures = self._test_promotion_interactions(locus, sha)
@@ -496,14 +502,14 @@ class Orchestrator:
             self.phenotype.promote(locus, sha)
             logger.info("promoted %s to dominant for %s", sha[:12], locus,
                         extra={"locus": locus, "sha": sha[:12], "event": "promotion"})
-            self._audit("promotion", locus=locus, sha=sha,
-                        fitness=arena.compute_fitness(allele))
+            fitness = arena.compute_fitness(allele, params=params)
+            self._audit("promotion", locus=locus, sha=sha, fitness=fitness)
             from sg.events import allele_promoted
-            self._publish(allele_promoted(locus, sha, arena.compute_fitness(allele)))
+            self._publish(allele_promoted(locus, sha, fitness))
             if self._meta_param_tracker is not None:
                 self._meta_param_tracker.record_snapshot(
                     entity_name=locus, entity_type="gene",
-                    outcome_fitness=arena.compute_fitness(allele),
+                    outcome_fitness=fitness,
                     allele_sha=sha, allele_survived=True,
                 )
 
@@ -556,7 +562,7 @@ class Orchestrator:
 
             record_feedback(target_allele, timescale, healthy, locus,
                            structure_hash=self._current_pathway_structure_hash)
-            fitness = arena.compute_fitness(target_allele)
+            fitness = arena.compute_fitness(target_allele, params=self._get_params(target_locus))
             self._contract_evolution.record_config_fitness(
                 target_locus, fitness, contract_store=self.contract_store,
             )
@@ -627,9 +633,7 @@ class Orchestrator:
 
     def _check_demotion(self, locus: str, sha: str) -> None:
         allele = self.registry.get(sha)
-        params = None
-        if self._meta_param_tracker is not None:
-            params = self._meta_param_tracker.get_params(locus)
+        params = self._get_params(locus)
         if allele and arena.should_demote(allele, params=params):
             arena.set_deprecated(allele)
             logger.info("demoted %s for %s (3 consecutive failures)",
@@ -641,7 +645,7 @@ class Orchestrator:
             if self._meta_param_tracker is not None:
                 self._meta_param_tracker.record_snapshot(
                     entity_name=locus, entity_type="gene",
-                    outcome_fitness=arena.compute_fitness(allele),
+                    outcome_fitness=arena.compute_fitness(allele, params=params),
                     allele_sha=sha, allele_survived=False,
                 )
 
@@ -1000,7 +1004,7 @@ class Orchestrator:
             allele = self.registry.get(dom_sha)
             if allele is None:
                 continue
-            fitness = arena.compute_fitness(allele)
+            fitness = arena.compute_fitness(allele, params=self._get_params(locus))
             self._stabilization_tracker.record_gene_fitness(
                 pathway_name, locus, fitness,
             )
@@ -1124,7 +1128,7 @@ class Orchestrator:
                 if dominant_sha:
                     allele = self.registry.get(dominant_sha)
                     if allele:
-                        gene_fitnesses.append(arena.compute_fitness(allele))
+                        gene_fitnesses.append(arena.compute_fitness(allele, params=self._get_params(step.locus)))
 
         if not gene_fitnesses:
             return False
@@ -1151,7 +1155,7 @@ class Orchestrator:
             if dom:
                 allele = self.registry.get(dom)
                 if allele:
-                    fitness = arena.compute_fitness(allele)
+                    fitness = arena.compute_fitness(allele, params=self._get_params(locus))
                     gene_fitness_map[locus] = fitness
                     per_step_fitness[locus] = fitness
 

@@ -470,15 +470,21 @@ load(); setInterval(load, 5000);
 
 @app.get("/metrics")
 def prometheus_metrics():
-    """Export Prometheus metrics."""
+    """Export Prometheus metrics (in-process collector or disk snapshot)."""
     from fastapi.responses import PlainTextResponse
-    if _metrics_collector is None:
+    collector = _metrics_collector
+    if collector is None:
+        # Try loading the snapshot written by the daemon process
+        from sg.metrics import MetricsCollector
+        snapshot_path = _project_root / ".sg" / "metrics.json"
+        collector = MetricsCollector.load(snapshot_path)
+    if collector is None:
         return PlainTextResponse(
-            "# No metrics collector configured\n",
+            "# No metrics available (daemon not running?)\n",
             media_type="text/plain",
         )
     return PlainTextResponse(
-        _metrics_collector.export(),
+        collector.export(),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
 

@@ -98,3 +98,42 @@ class MetricsCollector:
                 lines.append(f"# TYPE {obj.name} {kind}")
                 lines.append(f"{obj.name} {obj.value}")
         return "\n".join(lines) + "\n"
+
+    def save(self, path) -> None:
+        """Write metrics snapshot to a JSON file for cross-process sharing."""
+        import json
+        from pathlib import Path
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        for attr_name in dir(self):
+            obj = getattr(self, attr_name)
+            if isinstance(obj, (Counter, Gauge)):
+                data[obj.name] = {
+                    "value": obj.value,
+                    "type": "counter" if isinstance(obj, Counter) else "gauge",
+                    "help": obj.help_text,
+                }
+        path.write_text(json.dumps(data, indent=2) + "\n")
+
+    @classmethod
+    def load(cls, path) -> MetricsCollector | None:
+        """Load metrics snapshot from a JSON file.  Returns None if missing."""
+        import json
+        from pathlib import Path
+        path = Path(path)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+        collector = cls()
+        for attr_name in dir(collector):
+            obj = getattr(collector, attr_name)
+            if isinstance(obj, (Counter, Gauge)) and obj.name in data:
+                if isinstance(obj, Counter):
+                    obj.inc(data[obj.name]["value"])
+                else:
+                    obj.set(data[obj.name]["value"])
+        return collector

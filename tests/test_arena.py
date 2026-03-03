@@ -119,3 +119,32 @@ def test_params_none_uses_defaults():
     assert should_promote(candidate, None, params=None)
     a = make_allele(consecutive_failures=3)
     assert should_demote(a, params=None)
+
+
+def test_should_promote_uses_custom_fitness_weights():
+    """should_promote passes params through to compute_fitness for scoring."""
+    from sg.meta_params import EvolutionaryParams
+    from sg.fitness import record_feedback
+
+    # Candidate with convergence failure — fitness depends on weights
+    candidate = make_allele(successful_invocations=60, failed_invocations=0)
+    record_feedback(candidate, "convergence", False, "check1")
+
+    # Dominant with moderate fitness (simple: 55/80 = 0.69)
+    dominant = make_allele(sha256="dom", successful_invocations=55, failed_invocations=25)
+
+    # Default weights: convergence=0.5 penalizes candidate heavily
+    # Candidate temporal: 0.3*0.8 + 0.5*0.0 + 0.2*1.0 = 0.44 < 0.69 + 0.1
+    assert not should_promote(candidate, dominant)
+
+    # Custom weights: zero convergence weight + zero decay → candidate = 1.0
+    # 1.0 >= 0.69 + 0.05 → promoted
+    params = EvolutionaryParams(
+        promotion_min_invocations=5,
+        promotion_advantage=0.05,
+        immediate_weight=0.9,
+        convergence_weight=0.0,
+        resilience_weight=0.1,
+        convergence_decay_factor=0.0,
+    )
+    assert should_promote(candidate, dominant, params=params)

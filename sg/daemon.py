@@ -98,6 +98,14 @@ class Daemon:
         if self.event_bus is not None:
             self.event_bus.publish(tick_complete(self._tick_count, duration_ms))
 
+        # Persist metrics snapshot for cross-process consumers (dashboard)
+        if self.metrics_collector is not None:
+            try:
+                metrics_path = self.orchestrator.project_root / ".sg" / "metrics.json"
+                self.metrics_collector.save(metrics_path)
+            except Exception:
+                logger.debug("failed to save metrics snapshot", exc_info=True)
+
     def _run_health_checks(self) -> None:
         """Run diagnostic pathways and periodic snapshots."""
         logger.debug("running health checks (tick %d)", self._tick_count)

@@ -137,3 +137,22 @@ class TestDaemon:
                         metrics_collector=collector)
         daemon.start()
         assert collector.sg_daemon_ticks_total.value == 3
+
+    def test_metrics_snapshot_written_each_tick(self, tmp_path):
+        """Daemon writes metrics snapshot to .sg/metrics.json each tick."""
+        from sg.metrics import MetricsCollector
+        orch = FakeOrchestrator()
+        orch.project_root = tmp_path
+        bus = EventBus()
+        collector = MetricsCollector()
+        collector.attach(bus)
+        config = DaemonConfig(tick_interval=0.0, max_ticks=3)
+        daemon = Daemon(orch, event_bus=bus, config=config,
+                        metrics_collector=collector)
+        daemon.start()
+
+        snapshot_path = tmp_path / ".sg" / "metrics.json"
+        assert snapshot_path.exists()
+        loaded = MetricsCollector.load(snapshot_path)
+        assert loaded is not None
+        assert loaded.sg_daemon_ticks_total.value == 3.0

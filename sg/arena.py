@@ -79,10 +79,10 @@ def should_promote(
     advantage = params.promotion_advantage if params else PROMOTION_ADVANTAGE
     if candidate.total_invocations < min_invocations:
         return False
-    candidate_fitness = compute_fitness(candidate)
+    candidate_fitness = compute_fitness(candidate, params=params)
     if dominant is None:
         return candidate_fitness > 0.0
-    dominant_fitness = compute_fitness(dominant)
+    dominant_fitness = compute_fitness(dominant, params=params)
     return candidate_fitness >= dominant_fitness + advantage
 
 

@@ -240,15 +240,15 @@ class TestFederationEndpoints:
 
 
 class TestMetricsEndpoint:
-    def test_no_collector(self, dashboard_project):
-        """GET /metrics returns placeholder when no collector configured."""
+    def test_no_collector_no_snapshot(self, dashboard_project):
+        """GET /metrics returns fallback when no collector and no snapshot."""
         import sg.dashboard as dash
         dash._metrics_collector = None
         from fastapi.testclient import TestClient
         client = TestClient(dash.app)
         resp = client.get("/metrics")
         assert resp.status_code == 200
-        assert "No metrics collector" in resp.text
+        assert "No metrics available" in resp.text
 
     def test_with_collector(self, dashboard_project):
         """GET /metrics returns Prometheus exposition format."""
@@ -268,5 +268,32 @@ class TestMetricsEndpoint:
             assert resp.status_code == 200
             assert "sg_daemon_ticks_total" in resp.text
             assert "2" in resp.text  # 2 ticks
+        finally:
+            dash._metrics_collector = None
+
+    def test_loads_snapshot_from_disk(self, dashboard_project):
+        """GET /metrics reads daemon snapshot when no in-process collector."""
+        from sg.metrics import MetricsCollector
+        from sg.events import EventBus, tick_complete
+        import sg.dashboard as dash
+
+        # Simulate daemon writing a snapshot
+        collector = MetricsCollector()
+        bus = EventBus()
+        collector.attach(bus)
+        bus.publish(tick_complete(1, 42.0))
+        bus.publish(tick_complete(2, 38.0))
+        collector.save(dashboard_project / ".sg" / "metrics.json")
+
+        # Dashboard has no in-process collector
+        dash._metrics_collector = None
+        dash._project_root = dashboard_project
+        try:
+            from fastapi.testclient import TestClient
+            client = TestClient(dash.app)
+            resp = client.get("/metrics")
+            assert resp.status_code == 200
+            assert "sg_daemon_ticks_total" in resp.text
+            assert "2" in resp.text
         finally:
             dash._metrics_collector = None

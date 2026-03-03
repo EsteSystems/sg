@@ -21,11 +21,14 @@ DEMOTION_CONSECUTIVE_FAILURES = 3
 def compute_fitness(
     allele: AlleleMetadata,
     current_structure_hash: str = "",
+    structure_history: tuple[str, ...] | list[str] = (),
 ) -> float:
     """Compute fitness, using temporal scoring when feedback records exist."""
     if allele.fitness_records:
         from sg.fitness import compute_temporal_fitness
-        return compute_temporal_fitness(allele, current_structure_hash)
+        return compute_temporal_fitness(
+            allele, current_structure_hash, structure_history,
+        )
     total = allele.total_invocations
     if total == 0:
         return 0.0

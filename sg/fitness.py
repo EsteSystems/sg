@@ -26,8 +26,11 @@ CONVERGENCE_DECAY_FACTOR = 0.2
 # Maximum fitness records kept per allele (sliding window)
 MAX_FITNESS_RECORDS = 200
 
-# Discount factor for fitness records recorded under a different pathway structure
+# Discount base for fitness records recorded under a different pathway structure.
+# Records N structures ago get weight OLD_STRUCTURE_BASE ** N.
+# Kept as OLD_STRUCTURE_WEIGHT for backward compatibility when no history provided.
 OLD_STRUCTURE_WEIGHT = 0.5
+OLD_STRUCTURE_BASE = 0.7
 
 
 @dataclass
@@ -61,15 +64,40 @@ class FitnessRecord:
         )
 
 
+def _structure_discount(
+    record_hash: str,
+    current_hash: str,
+    structure_history: tuple[str, ...] | list[str] = (),
+) -> float:
+    """Compute progressive discount for a record from an older structure.
+
+    With *structure_history* (newest-first list of prior structure hashes),
+    records from N generations ago get weight ``OLD_STRUCTURE_BASE ** N``.
+    Without history, falls back to flat ``OLD_STRUCTURE_WEIGHT``.
+    """
+    if not record_hash or not current_hash:
+        return 1.0
+    if record_hash == current_hash:
+        return 1.0
+    if not structure_history:
+        return OLD_STRUCTURE_WEIGHT
+    for i, h in enumerate(structure_history):
+        if h == record_hash:
+            return OLD_STRUCTURE_BASE ** (i + 1)
+    # Unknown old structure: maximum decay
+    return OLD_STRUCTURE_BASE ** max(len(structure_history), 1)
+
+
 def _score_for_timescale(
     records: list[FitnessRecord],
     timescale: str,
     current_structure_hash: str = "",
+    structure_history: tuple[str, ...] | list[str] = (),
 ) -> float | None:
     """Compute score for a single timescale. Returns None if no records.
 
     When *current_structure_hash* is provided, records from a different
-    structure are discounted by OLD_STRUCTURE_WEIGHT.
+    structure are discounted progressively using *structure_history*.
     """
     relevant = [r for r in records if r.timescale == timescale]
     if not relevant:
@@ -77,10 +105,9 @@ def _score_for_timescale(
     weighted_successes = 0.0
     total_weight = 0.0
     for r in relevant:
-        w = 1.0
-        if (current_structure_hash and r.structure_hash
-                and r.structure_hash != current_structure_hash):
-            w = OLD_STRUCTURE_WEIGHT
+        w = _structure_discount(
+            r.structure_hash, current_structure_hash, structure_history,
+        )
         total_weight += w
         if r.success:
             weighted_successes += w
@@ -90,12 +117,14 @@ def _score_for_timescale(
 def compute_temporal_fitness(
     allele: AlleleMetadata,
     current_structure_hash: str = "",
+    structure_history: tuple[str, ...] | list[str] = (),
 ) -> float:
     """Compute weighted temporal fitness across three timescales.
 
     Falls back to simple fitness (immediate only) when no diagnostic
     feedback has been recorded.  When *current_structure_hash* is given,
-    records from older structures are discounted.
+    records from older structures are discounted progressively using
+    *structure_history* (newest-first list of prior structure hashes).
     """
     records = [FitnessRecord.from_dict(r) for r in allele.fitness_records]
 
@@ -106,8 +135,12 @@ def compute_temporal_fitness(
     immediate = allele.successful_invocations / max(total, 10)
 
     # Convergence and resilience from diagnostic feedback
-    convergence = _score_for_timescale(records, "convergence", current_structure_hash)
-    resilience = _score_for_timescale(records, "resilience", current_structure_hash)
+    convergence = _score_for_timescale(
+        records, "convergence", current_structure_hash, structure_history,
+    )
+    resilience = _score_for_timescale(
+        records, "resilience", current_structure_hash, structure_history,
+    )
 
     # If no diagnostic feedback, return simple fitness (backward compat)
     if convergence is None and resilience is None:

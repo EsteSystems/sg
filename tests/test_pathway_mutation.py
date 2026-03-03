@@ -159,6 +159,24 @@ class TestPathwayMutationThrottle:
         assert restored.cooldown_seconds == 300
         assert not restored.can_mutate("pw")
 
+    def test_reset_cooldown_clears(self):
+        throttle = PathwayMutationThrottle(cooldown_seconds=100)
+        throttle.record_mutation("pw")
+        assert not throttle.can_mutate("pw")
+        throttle.reset_cooldown("pw")
+        assert throttle.can_mutate("pw")
+
+    def test_can_mutate_after_reset(self):
+        throttle = PathwayMutationThrottle(cooldown_seconds=99999)
+        throttle.record_mutation("pw")
+        throttle.reset_cooldown("pw")
+        # Should be mutable immediately after reset
+        assert throttle.can_mutate("pw")
+
+    def test_reset_unknown_noop(self):
+        throttle = PathwayMutationThrottle()
+        throttle.reset_cooldown("nonexistent")  # no error
+
 
 # --- ReorderingOperator tests ---
 

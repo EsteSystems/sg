@@ -15,7 +15,8 @@ from sg import arena
 from sg.contracts import ContractStore
 from sg.fitness import (
     FitnessRecord, record_feedback, compute_temporal_fitness,
-    _score_for_timescale, OLD_STRUCTURE_WEIGHT,
+    _score_for_timescale, _structure_discount,
+    OLD_STRUCTURE_WEIGHT, OLD_STRUCTURE_BASE,
 )
 from sg.fusion import FusionTracker
 from sg_network import MockNetworkKernel
@@ -214,3 +215,53 @@ class TestTagGeneRecords:
 
         # Already-tagged record should keep its original hash
         assert allele.fitness_records[0]["structure_hash"] == "existing_hash"
+
+
+class TestProgressiveDecay:
+    """Progressive fitness decay based on structure history distance."""
+
+    def test_progressive_decay_one_gen(self):
+        """Records one generation old get 0.7^1 = 0.7 weight."""
+        d = _structure_discount("old", "current", ["old"])
+        assert abs(d - OLD_STRUCTURE_BASE) < 1e-9
+
+    def test_progressive_decay_two_gens(self):
+        """Records two generations old get 0.7^2 = 0.49 weight."""
+        d = _structure_discount("ancient", "current", ["recent", "ancient"])
+        assert abs(d - OLD_STRUCTURE_BASE ** 2) < 1e-9
+
+    def test_unknown_structure_max_decay(self):
+        """Unknown old structure gets maximum decay (0.7^len(history))."""
+        d = _structure_discount("mystery", "current", ["a", "b", "c"])
+        assert abs(d - OLD_STRUCTURE_BASE ** 3) < 1e-9
+
+    def test_empty_history_flat_discount(self):
+        """Without history, falls back to flat OLD_STRUCTURE_WEIGHT."""
+        d = _structure_discount("old", "current", [])
+        assert abs(d - OLD_STRUCTURE_WEIGHT) < 1e-9
+
+    def test_current_structure_no_discount(self):
+        """Records from the current structure get weight 1.0."""
+        d = _structure_discount("current", "current", ["old"])
+        assert d == 1.0
+
+    def test_no_hashes_no_discount(self):
+        """Records without hashes get weight 1.0."""
+        assert _structure_discount("", "current", ["old"]) == 1.0
+        assert _structure_discount("old", "", ["old"]) == 1.0
+
+    def test_score_with_history(self):
+        """_score_for_timescale uses progressive decay with history."""
+        records = [
+            FitnessRecord("convergence", True, "x", structure_hash="current"),
+            FitnessRecord("convergence", False, "x", structure_hash="old"),
+        ]
+        # With history: success weight=1.0, failure weight=0.7
+        # score = 1.0 / (1.0 + 0.7) = 0.588
+        score = _score_for_timescale(
+            records, "convergence",
+            current_structure_hash="current",
+            structure_history=["old"],
+        )
+        expected = 1.0 / (1.0 + OLD_STRUCTURE_BASE)
+        assert abs(score - expected) < 0.01

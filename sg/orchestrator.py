@@ -25,7 +25,9 @@ from sg.pathway import Pathway, PathwayStep, execute_pathway, pathway_from_contr
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
 from sg.safety import Transaction, SafeKernel, requires_transaction, is_shadow_only, SHADOW_PROMOTION_THRESHOLD
+from sg.contract_evolution import ContractEvolution
 from sg.decomposition import DecompositionDetector
+from sg.locus_discovery import CrossLocusFailureAnalyzer
 from sg.pathway_fitness import PathwayFitnessTracker
 from sg.pathway_registry import PathwayRegistry, steps_from_pathway, compute_structure_sha
 from sg import pathway_arena
@@ -52,6 +54,7 @@ class Orchestrator:
         pathway_registry: PathwayRegistry | None = None,
         topology_registry=None,
         meta_param_tracker=None,
+        event_bus=None,
     ):
         self.registry = registry
         self.phenotype = phenotype
@@ -61,6 +64,7 @@ class Orchestrator:
         self.contract_store = contract_store
         self.project_root = project_root
         self.audit_log = audit_log
+        self._event_bus = event_bus
         self.pathway_fitness_tracker = pathway_fitness_tracker
         self.pathway_registry = pathway_registry
         self.topology_registry = topology_registry
@@ -73,6 +77,7 @@ class Orchestrator:
         self.feedback_timescale: str | None = None  # override feeds timescale (e.g. "resilience")
         self._current_pathway_context: str | None = None
         self._current_pathway_structure_hash: str = ""
+        self._pathway_structure_histories: dict[str, list[str]] = {}
         self._pathway_mutation_throttle = self._load_pathway_mutation_throttle()
         from sg.stabilization import StabilizationTracker
         self._stabilization_tracker = StabilizationTracker.open(
@@ -82,12 +87,23 @@ class Orchestrator:
         self._failure_discovery = FailureDiscovery.open(
             project_root / ".sg" / "failure_discovery.json"
         )
+        self._contract_evolution = ContractEvolution.open(
+            project_root / ".sg" / "contract_evolution.json"
+        )
+        self._cross_locus_analyzer = CrossLocusFailureAnalyzer.open(
+            project_root / ".sg" / "locus_discovery.json"
+        )
 
     def _audit(self, event: str, locus: str = "", sha: str = "",
                 **details) -> None:
         """Record an audit entry if an audit log is configured."""
         if self.audit_log is not None:
             self.audit_log.record(event, locus=locus, sha=sha, **details)
+
+    def _publish(self, event) -> None:
+        """Publish an event to the event bus if configured."""
+        if self._event_bus is not None:
+            self._event_bus.publish(event)
 
     def _get_risk(self, locus: str) -> BlastRadius:
         """Get the blast radius for a locus from its contract."""
@@ -146,6 +162,9 @@ class Orchestrator:
                 self._schedule_verify(locus, input_json)
                 self._check_promotion(locus, sha)
                 self._check_regression(locus, sha, input_json)
+                gene_contract = self.contract_store.get_gene(locus)
+                self._contract_evolution.record_output(
+                    locus, result, gene_contract)
                 logger.info("success via %s (fitness: %.2f)",
                             sha[:12], arena.compute_fitness(allele),
                             extra={"locus": locus, "sha": sha[:12]})
@@ -159,6 +178,7 @@ class Orchestrator:
                                     len(rolled), extra={"locus": locus})
                 last_error = str(e)
                 self.decomposition_detector.record_error(locus, sha, last_error)
+                self._cross_locus_analyzer.record_error(locus, last_error)
                 gene_contract = self.contract_store.get_gene(locus)
                 known_fails = gene_contract.fails_when if gene_contract else []
                 proposal = self._failure_discovery.record_error(
@@ -330,6 +350,7 @@ class Orchestrator:
 
                 if first_passing is None:
                     first_passing = (result, new_sha)
+                self._contract_evolution.record_mutation_success(locus)
 
             except Exception as e:
                 if txn and txn.action_count > 0:
@@ -340,6 +361,7 @@ class Orchestrator:
                 allele = self.registry.get(new_sha)
                 if allele:
                     arena.record_failure(allele)
+                self._contract_evolution.record_mutation_failure(locus, str(e))
                 logger.warning("mutant %s failed: %s (candidate %d/%d)",
                                new_sha[:12], e, i + 1, len(candidates),
                                extra={"locus": locus, "sha": new_sha[:12]})
@@ -352,6 +374,8 @@ class Orchestrator:
         result, sha = first_passing
         self._audit("mutation_success", locus=locus, sha=sha,
                     candidates_tested=len(candidates))
+        from sg.events import mutation_generated
+        self._publish(mutation_generated(locus, sha, len(candidates)))
         return first_passing
 
     def _try_decomposition(
@@ -454,6 +478,8 @@ class Orchestrator:
                         extra={"locus": locus, "sha": sha[:12], "event": "promotion"})
             self._audit("promotion", locus=locus, sha=sha,
                         fitness=arena.compute_fitness(allele))
+            from sg.events import allele_promoted
+            self._publish(allele_promoted(locus, sha, arena.compute_fitness(allele)))
             if self._meta_param_tracker is not None:
                 self._meta_param_tracker.record_snapshot(
                     entity_name=locus, entity_type="gene",
@@ -489,10 +515,16 @@ class Orchestrator:
         if not isinstance(healthy, bool):
             return
 
+        # Record for feeds correlation analysis
+        self._contract_evolution.record_diagnostic_output(locus, data)
+
         # Determine timescale from feeds declarations (or override)
         for feed in gene_contract.feeds:
             target_locus = feed.target_locus
             timescale = self.feedback_timescale or feed.timescale
+
+            # Ensure correlation pair exists for feeds discovery
+            self._contract_evolution.ensure_correlation_pair(locus, target_locus)
 
             # Find the dominant allele at the target config locus
             dominant_sha = self.phenotype.get_dominant(target_locus)
@@ -505,6 +537,7 @@ class Orchestrator:
             record_feedback(target_allele, timescale, healthy, locus,
                            structure_hash=self._current_pathway_structure_hash)
             fitness = arena.compute_fitness(target_allele)
+            self._contract_evolution.record_config_fitness(target_locus, fitness)
             logger.info("feedback %s -> %s (%s: %s, fitness: %.2f)",
                         locus, target_locus, timescale,
                         "healthy" if healthy else "unhealthy", fitness,
@@ -578,6 +611,8 @@ class Orchestrator:
                         sha[:12], locus,
                         extra={"locus": locus, "sha": sha[:12], "event": "demotion"})
             self._audit("demotion", locus=locus, sha=sha)
+            from sg.events import allele_demoted
+            self._publish(allele_demoted(locus, sha))
             if self._meta_param_tracker is not None:
                 self._meta_param_tracker.record_snapshot(
                     entity_name=locus, entity_type="gene",
@@ -863,15 +898,23 @@ class Orchestrator:
             self.phenotype.promote_pathway(pathway_name, sha)
             if old_structure_hash:
                 self._tag_gene_fitness_records(pathway_name, old_structure_hash)
+                # Track structure history for progressive fitness decay
+                history = self._pathway_structure_histories.get(pathway_name, [])
+                history.insert(0, old_structure_hash)
+                self._pathway_structure_histories[pathway_name] = history[:5]
             self._stabilization_tracker.start_stabilization(
                 pathway_name, sha, self._pathway_loci(pathway_name),
             )
+            self._pathway_mutation_throttle.reset_cooldown(pathway_name)
             logger.info("promoted pathway allele %s for %s",
                         sha[:12], pathway_name,
                         extra={"pathway": pathway_name, "sha": sha[:12],
                                "event": "pathway_promotion"})
             self._audit("pathway_promotion", locus=pathway_name, sha=sha,
                         fitness=pathway_arena.compute_pathway_fitness(allele))
+            from sg.events import pathway_promoted
+            self._publish(pathway_promoted(
+                pathway_name, sha, pathway_arena.compute_pathway_fitness(allele)))
             if self._meta_param_tracker is not None:
                 self._meta_param_tracker.record_snapshot(
                     entity_name=pathway_name, entity_type="pathway",
@@ -1296,6 +1339,18 @@ class Orchestrator:
             )
         except Exception:
             logger.error("save_state: failed to save failure discovery", exc_info=True)
+        try:
+            self._contract_evolution.save(
+                self.project_root / ".sg" / "contract_evolution.json"
+            )
+        except Exception:
+            logger.error("save_state: failed to save contract evolution", exc_info=True)
+        try:
+            self._cross_locus_analyzer.save(
+                self.project_root / ".sg" / "locus_discovery.json"
+            )
+        except Exception:
+            logger.error("save_state: failed to save locus discovery", exc_info=True)
         if self.topology_registry is not None:
             try:
                 self.topology_registry.save_index()

@@ -1209,6 +1209,106 @@ def cmd_new_plugin(args: argparse.Namespace) -> None:
     print(f"  6. Verify: sg kernels")
 
 
+def cmd_loci(args: argparse.Namespace) -> None:
+    """Show cross-locus failure proposals."""
+    from sg.locus_discovery import CrossLocusFailureAnalyzer
+
+    root = get_project_root()
+    analyzer = CrossLocusFailureAnalyzer.open(root / ".sg" / "locus_discovery.json")
+    proposals = analyzer.get_proposals()
+    if not proposals:
+        print("No pending locus proposals.")
+        return
+    for i, p in enumerate(proposals):
+        print(f"[{i}] {p.proposed_name} ({p.family})")
+        print(f"    {p.description}")
+        print(f"    pattern: {p.evidence_pattern}")
+        print(f"    affected: {', '.join(p.affected_loci)}")
+        print(f"    occurrences: {p.occurrence_count}")
+        print()
+
+
+def cmd_daemon(args: argparse.Namespace) -> None:
+    """Run the daemon loop."""
+    from sg.daemon import Daemon, DaemonConfig
+    from sg.events import EventBus
+
+    root = get_project_root()
+    contract_store = load_contract_store(root)
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+    fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
+    mutation_engine = make_mutation_engine(args, root, contract_store)
+    from sg.kernel.discovery import load_kernel
+    kernel = load_kernel(getattr(args, "kernel", "mock"))
+    pft = PathwayFitnessTracker.open(root / "pathway_fitness.json")
+    pr = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+    event_bus = EventBus()
+
+    orch = Orchestrator(
+        registry=registry, phenotype=phenotype,
+        mutation_engine=mutation_engine, fusion_tracker=fusion_tracker,
+        kernel=kernel, contract_store=contract_store,
+        project_root=root,
+        pathway_fitness_tracker=pft, pathway_registry=pr,
+        event_bus=event_bus,
+    )
+
+    config = DaemonConfig(
+        tick_interval=getattr(args, "tick_interval", 60.0),
+        max_ticks=getattr(args, "max_ticks", None),
+    )
+    daemon = Daemon(orch, event_bus=event_bus, config=config)
+    daemon.start()
+
+
+def cmd_contracts(args: argparse.Namespace) -> None:
+    """Manage contract evolution proposals."""
+    from sg.contract_evolution import ContractEvolution
+
+    root = get_project_root()
+    ce = ContractEvolution.open(root / ".sg" / "contract_evolution.json")
+    sub = getattr(args, "contracts_command", None)
+
+    if sub == "proposals":
+        locus = getattr(args, "locus", None)
+        proposals = ce.get_proposals(locus=locus)
+        if not proposals:
+            print("No pending proposals.")
+            return
+        for i, p in enumerate(proposals):
+            print(f"[{i}] {p.locus}: {p.proposal_type}")
+            print(f"    {p.description}")
+            if p.proposed_value:
+                print(f"    proposed: {p.proposed_value}")
+            print(f"    evidence: {p.evidence_count} observations")
+            print()
+
+    elif sub == "accept":
+        locus = args.locus
+        index = args.index
+        if ce.accept_proposal(locus, index):
+            ce.save()
+            print(f"Accepted proposal {index} for {locus}.")
+        else:
+            print(f"No pending proposal at index {index} for {locus}.", file=sys.stderr)
+            sys.exit(1)
+
+    elif sub == "reject":
+        locus = args.locus
+        index = args.index
+        if ce.reject_proposal(locus, index):
+            ce.save()
+            print(f"Rejected proposal {index} for {locus}.")
+        else:
+            print(f"No pending proposal at index {index} for {locus}.", file=sys.stderr)
+            sys.exit(1)
+
+    else:
+        print("Usage: sg contracts {proposals|accept|reject}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_recover(args: argparse.Namespace) -> None:
     """Rebuild registry index from source files."""
     root = get_project_root()
@@ -1338,6 +1438,25 @@ def main() -> None:
     pool_serve.add_argument("--reciprocity", type=int, default=1,
                             help="min pushes before pulls allowed (0 disables, default: 1)")
 
+    subparsers.add_parser("loci", help="show cross-locus failure proposals")
+
+    daemon_parser = subparsers.add_parser("daemon", help="run continuous evolutionary loop")
+    daemon_parser.add_argument("--tick-interval", type=float, default=60.0,
+                               help="seconds between ticks (default: 60)")
+    daemon_parser.add_argument("--max-ticks", type=int, default=None,
+                               help="stop after N ticks (default: forever)")
+
+    contracts_parser = subparsers.add_parser("contracts", help="manage contract evolution proposals")
+    contracts_sub = contracts_parser.add_subparsers(dest="contracts_command")
+    contracts_proposals = contracts_sub.add_parser("proposals", help="show pending proposals")
+    contracts_proposals.add_argument("locus", nargs="?", help="filter by locus")
+    contracts_accept = contracts_sub.add_parser("accept", help="accept a proposal")
+    contracts_accept.add_argument("locus", help="locus name")
+    contracts_accept.add_argument("index", type=int, help="proposal index")
+    contracts_reject = contracts_sub.add_parser("reject", help="reject a proposal")
+    contracts_reject.add_argument("locus", help="locus name")
+    contracts_reject.add_argument("index", type=int, help="proposal index")
+
     subparsers.add_parser("recover", help="rebuild registry index from source files")
 
     new_plugin_parser = subparsers.add_parser("new-plugin", help="scaffold a new domain plugin")
@@ -1398,6 +1517,12 @@ def main() -> None:
         cmd_snapshots(args)
     elif args.command == "pool":
         cmd_pool(args)
+    elif args.command == "loci":
+        cmd_loci(args)
+    elif args.command == "daemon":
+        cmd_daemon(args)
+    elif args.command == "contracts":
+        cmd_contracts(args)
     elif args.command == "recover":
         cmd_recover(args)
     elif args.command == "new-plugin":

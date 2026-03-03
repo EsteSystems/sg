@@ -67,6 +67,10 @@ class PathwayMutationThrottle:
     def record_mutation(self, pathway_name: str) -> None:
         self._last_mutation[pathway_name] = time.time()
 
+    def reset_cooldown(self, pathway_name: str) -> None:
+        """Clear cooldown after a promotion makes the old timer irrelevant."""
+        self._last_mutation.pop(pathway_name, None)
+
     def to_dict(self) -> dict:
         return {
             "cooldown_seconds": self.cooldown_seconds,

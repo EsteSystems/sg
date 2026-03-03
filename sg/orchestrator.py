@@ -94,6 +94,18 @@ class Orchestrator:
             project_root / ".sg" / "locus_discovery.json"
         )
 
+    def close(self) -> None:
+        """Shut down background tasks and save state."""
+        self.verify_scheduler.cancel_all()
+        self.save_state()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def _audit(self, event: str, locus: str = "", sha: str = "",
                 **details) -> None:
         """Record an audit entry if an audit log is configured."""

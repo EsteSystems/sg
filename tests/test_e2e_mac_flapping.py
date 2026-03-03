@@ -21,8 +21,12 @@ import sg_network
 from sg_network import MockNetworkKernel
 from sg.mutation import MockMutationEngine
 from sg.orchestrator import Orchestrator
+from sg.parser.types import BlastRadius
+from sg.pathway_fitness import PathwayFitnessTracker
+from sg.pathway_registry import PathwayRegistry
 from sg.phenotype import PhenotypeMap
 from sg.registry import Registry
+from sg.safety import SHADOW_PROMOTION_THRESHOLD
 
 
 CONTRACTS_DIR = sg_network.contracts_path()
@@ -439,3 +443,167 @@ class TestEvolutionaryLoop:
 
         # "leaked_br" should have been rolled back
         assert orch.kernel.get_bridge("leaked_br") is None
+
+
+def make_orch_full(project_root: Path) -> Orchestrator:
+    """Orchestrator with pathway and topology registries."""
+    from sg.parser.types import GeneFamily
+    from sg.topology_registry import TopologyRegistry
+
+    contract_store = ContractStore.open(project_root / "contracts")
+    for locus in contract_store.known_loci():
+        gc = contract_store.get_gene(locus)
+        if gc and gc.family == GeneFamily.CONFIGURATION and gc.verify_within:
+            gc.verify_within = "0.01s"
+    registry = Registry.open(project_root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(project_root / "phenotype.toml")
+    fusion_tracker = FusionTracker.open(project_root / "fusion_tracker.json")
+    pft = PathwayFitnessTracker.open(project_root / "pathway_fitness.json")
+    pr = PathwayRegistry.open(project_root / ".sg" / "pathway_registry")
+    tr = TopologyRegistry.open(project_root / ".sg" / "topology_registry")
+    mutation_engine = MockMutationEngine(project_root / "fixtures")
+    kernel = MockNetworkKernel()
+    return Orchestrator(
+        registry=registry,
+        phenotype=phenotype,
+        mutation_engine=mutation_engine,
+        fusion_tracker=fusion_tracker,
+        kernel=kernel,
+        contract_store=contract_store,
+        project_root=project_root,
+        pathway_fitness_tracker=pft,
+        pathway_registry=pr,
+        topology_registry=tr,
+    )
+
+
+class TestDeployTopologyE2E:
+    """E2E: deploy a topology via run_topology, verify resource creation."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
+    def test_topology_deploy_creates_resources(self, project):
+        """run_topology creates bridges, bonds, VLANs as declared."""
+        orch = make_orch_full(project)
+        self._orch = orch
+
+        input_json = json.dumps({
+            "bridge_name": "br0",
+            "bridge_ifaces": ["eth0"],
+            "uplink": "eth1",
+            "bond_name": "bond0",
+            "bond_mode": "active-backup",
+            "bond_members": ["eth2", "eth3"],
+            "vlans": [100, 200],
+        })
+        outputs = orch.run_topology("production_server", input_json)
+
+        # Verify resources
+        assert orch.kernel.get_bridge("br0") is not None
+        assert orch.kernel.get_bond("bond0") is not None
+        assert len(outputs) >= 1
+
+    def test_topology_allele_registered(self, project):
+        """After deployment, topology allele is in the registry."""
+        orch = make_orch_full(project)
+        self._orch = orch
+
+        input_json = json.dumps({
+            "bridge_name": "br0",
+            "bridge_ifaces": ["eth0"],
+            "uplink": "eth1",
+            "bond_name": "bond0",
+            "bond_mode": "active-backup",
+            "bond_members": ["eth2", "eth3"],
+            "vlans": [100, 200],
+        })
+        orch.run_topology("production_server", input_json)
+
+        stack = orch.phenotype.get_topology_stack("production_server")
+        assert len(stack) >= 1
+        allele = orch.topology_registry.get(stack[0])
+        assert allele is not None
+        assert allele.state == "dominant"
+
+
+class TestShadowModePathwayE2E:
+    """E2E: shadow mode through pathway execution."""
+
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
+    def test_pathway_with_high_risk_gene(self, project):
+        """HIGH risk gene in pathway runs shadow, real kernel untouched."""
+        orch = make_orch(project)
+        self._orch = orch
+
+        # Override mac_preserve to HIGH risk
+        gc = orch.contract_store.get_gene("mac_preserve")
+        original_risk = gc.risk
+        gc.risk = BlastRadius.HIGH
+
+        try:
+            # First provision so bridge exists
+            orch.run_pathway("provision_management_bridge", PROVISION_INPUT)
+
+            sha = orch.phenotype.get_dominant("mac_preserve")
+            allele = orch.registry.get(sha)
+            initial_shadow = allele.shadow_successes
+
+            # Run health check pathway which includes mac_preserve
+            # mac_preserve is in the bridge configuration, not health check
+            # Let's execute the locus directly through the pathway context
+            orch.execute_locus("mac_preserve", json.dumps({
+                "device": "br0",
+                "source_mac": "02:aa:bb:cc:dd:ee",
+            }))
+
+            # Shadow should have incremented
+            assert allele.shadow_successes > initial_shadow
+            # Real kernel should not have the MAC
+            real_mac = orch.kernel.get_device_mac("br0")
+            assert real_mac != "02:aa:bb:cc:dd:ee"
+        finally:
+            gc.risk = original_risk
+
+    def test_shadow_to_live_transition_in_execution(self, project):
+        """Gene transitions from shadow to live after reaching threshold."""
+        orch = make_orch(project)
+        self._orch = orch
+
+        gc = orch.contract_store.get_gene("mac_preserve")
+        original_risk = gc.risk
+        gc.risk = BlastRadius.HIGH
+
+        try:
+            orch.kernel.create_bridge("br0", [])
+
+            sha = orch.phenotype.get_dominant("mac_preserve")
+            allele = orch.registry.get(sha)
+
+            # Accumulate shadow successes
+            for _ in range(SHADOW_PROMOTION_THRESHOLD):
+                orch.execute_locus("mac_preserve", json.dumps({
+                    "device": "br0",
+                    "source_mac": "02:aa:bb:cc:dd:ee",
+                }))
+
+            assert allele.shadow_successes >= SHADOW_PROMOTION_THRESHOLD
+
+            # Now should execute live
+            orch.execute_locus("mac_preserve", json.dumps({
+                "device": "br0",
+                "source_mac": "02:aa:bb:cc:dd:ee",
+            }))
+
+            # Real kernel should now have the MAC
+            assert orch.kernel.get_device_mac("br0") == "02:aa:bb:cc:dd:ee"
+        finally:
+            gc.risk = original_risk

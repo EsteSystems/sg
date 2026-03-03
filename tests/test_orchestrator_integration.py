@@ -581,3 +581,33 @@ class TestPathwayMutationFromExhaustion:
             # Should be in phenotype fallback stack
             stack = orch.phenotype.get_pathway_stack(pw_name)
             assert new.structure_sha in stack
+
+
+class TestOrchestratorContextManager:
+    """Orchestrator supports with-statement and close()."""
+
+    def test_context_manager_saves_state(self, full_project):
+        """Using 'with' auto-saves state on exit."""
+        with _make_orchestrator(full_project) as orch:
+            orch.execute_locus("bridge_create", json.dumps({
+                "bridge_name": "br0", "interfaces": ["eth0"],
+            }))
+        # After exiting context, phenotype should be persisted
+        phenotype = PhenotypeMap.load(full_project / "phenotype.toml")
+        assert phenotype.get_dominant("bridge_create") is not None
+
+    def test_context_manager_cancels_timers(self, full_project):
+        """close() cancels verify scheduler timers."""
+        orch = _make_orchestrator(full_project)
+        orch.execute_locus("bridge_create", json.dumps({
+            "bridge_name": "br0", "interfaces": ["eth0"],
+        }))
+        pending_before = orch.verify_scheduler.pending_count
+        orch.close()
+        assert orch.verify_scheduler.pending_count == 0
+
+    def test_close_idempotent(self, full_project):
+        """Calling close() twice does not raise."""
+        orch = _make_orchestrator(full_project)
+        orch.close()
+        orch.close()  # should not raise

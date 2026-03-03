@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from sg.audit import AuditLog, AuditEntry
+from sg.audit import AuditLog, AuditEntry, MAX_AUDIT_ENTRIES, MAX_AUDIT_SIZE
 
 
 class TestAuditLog:
@@ -60,6 +60,29 @@ class TestAuditLog:
         log = AuditLog(tmp_path / "audit.jsonl")
         entry = log.record("test")
         assert entry.timestamp > 0
+
+
+    def test_rotation_caps_entries(self, tmp_path, monkeypatch):
+        """When file exceeds size limit, rotation trims to MAX_AUDIT_ENTRIES."""
+        monkeypatch.setattr("sg.audit.MAX_AUDIT_SIZE", 500)
+        monkeypatch.setattr("sg.audit.MAX_AUDIT_ENTRIES", 10)
+        log = AuditLog(tmp_path / "audit.jsonl")
+        for i in range(50):
+            log.record(f"event-{i}", locus="test")
+        lines = (tmp_path / "audit.jsonl").read_text().strip().splitlines()
+        assert len(lines) <= 10
+
+    def test_rotation_preserves_recent(self, tmp_path, monkeypatch):
+        """After rotation, the most recent entries are preserved."""
+        monkeypatch.setattr("sg.audit.MAX_AUDIT_SIZE", 500)
+        monkeypatch.setattr("sg.audit.MAX_AUDIT_ENTRIES", 10)
+        log = AuditLog(tmp_path / "audit.jsonl")
+        for i in range(50):
+            log.record(f"event-{i}", locus="test")
+        recent = log.read_recent(5)
+        # The last 5 entries should be the most recent
+        assert recent[-1].event == "event-49"
+        assert recent[-2].event == "event-48"
 
 
 class TestAuditEntry:

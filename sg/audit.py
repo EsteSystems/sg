@@ -4,10 +4,9 @@ Records significant evolutionary events: promotions, demotions, mutations,
 regressions, and pathway completions. Each entry is a single JSON line
 with a timestamp, event type, locus/sha context, and free-form details.
 
-Known limitation: no log rotation. The audit log grows without bound.
-For long-running deployments, external log rotation (e.g. logrotate) is
-recommended. read_recent() uses tail-seeking for O(count) read cost;
-read_all() still scans the full file.
+Internal rotation: when the log exceeds MAX_AUDIT_SIZE bytes, it is
+truncated to the most recent entries. read_recent() uses tail-seeking
+for O(count) read cost.
 
 Usage::
 
@@ -19,12 +18,16 @@ Usage::
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
 from sg.filelock import file_lock, file_lock_shared
+
+MAX_AUDIT_SIZE = 1_000_000  # 1 MB — triggers rotation
+MAX_AUDIT_ENTRIES = 10_000  # keep this many entries after rotation
 
 
 @dataclass
@@ -51,7 +54,7 @@ class AuditLog:
 
     def record(self, event: str, locus: str = "", sha: str = "",
                **details: Any) -> AuditEntry:
-        """Append an audit entry. Creates parent dirs if needed."""
+        """Append an audit entry.  Rotates when file exceeds MAX_AUDIT_SIZE."""
         entry = AuditEntry(
             timestamp=time.time(),
             event=event,
@@ -63,7 +66,28 @@ class AuditLog:
         with file_lock(self.path):
             with open(self.path, "a") as f:
                 f.write(json.dumps(entry.to_dict(), default=str) + "\n")
+            self._maybe_rotate()
         return entry
+
+    def _maybe_rotate(self) -> None:
+        """Truncate to MAX_AUDIT_ENTRIES if file exceeds MAX_AUDIT_SIZE.
+
+        Must be called while holding the file lock.
+        """
+        try:
+            size = os.path.getsize(self.path)
+        except OSError:
+            return
+        if size <= MAX_AUDIT_SIZE:
+            return
+        try:
+            lines = self.path.read_text().splitlines()
+        except OSError:
+            return
+        if len(lines) <= MAX_AUDIT_ENTRIES:
+            return
+        kept = lines[-MAX_AUDIT_ENTRIES:]
+        self.path.write_text("\n".join(kept) + "\n")
 
     def read_all(self) -> list[AuditEntry]:
         """Read all entries from the log."""

@@ -291,6 +291,12 @@ class TestLineage:
 # --- Allele competition arena ---
 
 class TestCompete:
+    @pytest.fixture(autouse=True)
+    def _cleanup(self):
+        yield
+        if hasattr(self, "_orch"):
+            self._orch.verify_scheduler.cancel_all()
+
     def test_cmd_compete_runs_trials(self, project, capsys):
         """cmd_compete runs trial rounds and reports results."""
         from sg.cli import cmd_compete

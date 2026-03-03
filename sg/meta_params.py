@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from sg.filelock import atomic_write_text, file_lock
+from sg.filelock import atomic_write_text, file_lock, file_lock_shared
 from sg.log import get_logger
 
 logger = get_logger("meta_params")
@@ -221,7 +221,8 @@ class MetaParamTracker:
         if not path.exists():
             return
         try:
-            data = json.loads(path.read_text())
+            with file_lock_shared(path):
+                data = json.loads(path.read_text())
         except json.JSONDecodeError:
             logger.warning("meta params data corrupted at %s, starting fresh", path)
             return

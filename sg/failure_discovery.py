@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sg.decomposition import _normalize_error
-from sg.filelock import atomic_write_text, file_lock
+from sg.filelock import atomic_write_text, file_lock, file_lock_shared
 from sg.log import get_logger
 
 logger = get_logger("failure_discovery")
@@ -238,7 +238,8 @@ class FailureDiscovery:
         if not path.exists():
             return
         try:
-            data = json.loads(path.read_text())
+            with file_lock_shared(path):
+                data = json.loads(path.read_text())
         except json.JSONDecodeError:
             logger.warning("failure discovery data corrupted at %s, starting fresh", path)
             return

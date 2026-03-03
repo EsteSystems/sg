@@ -9,7 +9,7 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from sg.filelock import atomic_write_text, file_lock
+from sg.filelock import atomic_write_text, file_lock, file_lock_shared
 from sg.log import get_logger
 
 from sg.registry import AlleleMetadata
@@ -91,7 +91,8 @@ class RegressionDetector:
         """Load regression history from JSON."""
         if path.exists():
             try:
-                data = json.loads(path.read_text())
+                with file_lock_shared(path):
+                    data = json.loads(path.read_text())
             except json.JSONDecodeError:
                 logger.warning("regression history corrupted at %s, starting fresh", path)
                 return

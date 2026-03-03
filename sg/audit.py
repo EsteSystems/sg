@@ -24,6 +24,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
+from sg.filelock import file_lock, file_lock_shared
+
 
 @dataclass
 class AuditEntry:
@@ -58,16 +60,19 @@ class AuditLog:
             details=details,
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a") as f:
-            f.write(json.dumps(entry.to_dict(), default=str) + "\n")
+        with file_lock(self.path):
+            with open(self.path, "a") as f:
+                f.write(json.dumps(entry.to_dict(), default=str) + "\n")
         return entry
 
     def read_all(self) -> list[AuditEntry]:
         """Read all entries from the log."""
         if not self.path.exists():
             return []
+        with file_lock_shared(self.path):
+            lines = self.path.read_text().splitlines()
         entries = []
-        for line in self.path.read_text().splitlines():
+        for line in lines:
             line = line.strip()
             if line:
                 entries.append(AuditEntry.from_dict(json.loads(line)))

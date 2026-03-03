@@ -10,7 +10,7 @@ from pathlib import Path
 
 from sg import arena
 from sg.audit import AuditLog
-from sg.filelock import atomic_write_text, file_lock
+from sg.filelock import atomic_write_text, file_lock, file_lock_shared
 from sg.log import get_logger, correlation_scope
 
 logger = get_logger("orchestrator")
@@ -696,7 +696,7 @@ class Orchestrator:
                 self.kernel,
                 pathway_fitness_tracker=self.pathway_fitness_tracker,
             )
-        except RuntimeError:
+        except Exception:
             if on_failure == "rollback all":
                 self._rollback_pathway_resources(resources_before)
             raise
@@ -731,7 +731,7 @@ class Orchestrator:
                 self._record_stabilization_fitness(pathway_name)
                 self._check_pathway_promotion(pathway_name, sha)
                 return outputs
-            except RuntimeError as e:
+            except Exception as e:
                 last_error = str(e)
                 pathway_arena.record_pathway_failure(pw_allele)
                 self._check_pathway_demotion(pathway_name, sha)
@@ -968,7 +968,8 @@ class Orchestrator:
         throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
         if throttle_path.exists():
             try:
-                data = json.loads(throttle_path.read_text())
+                with file_lock_shared(throttle_path):
+                    data = json.loads(throttle_path.read_text())
                 throttle = PathwayMutationThrottle.from_dict(data)
             except json.JSONDecodeError:
                 logger.warning("pathway mutation throttle corrupted, starting fresh")
@@ -1183,7 +1184,7 @@ class Orchestrator:
                 logger.info("Topology '%s' deployed via allele %s (%d output(s))",
                             topology_name, sha[:12], len(outputs))
                 return outputs
-            except RuntimeError as e:
+            except Exception as e:
                 last_error = str(e)
                 topology_arena.record_topology_failure(topo_allele)
                 self._check_topology_demotion(topology_name, sha)
@@ -1246,31 +1247,64 @@ class Orchestrator:
                 )
 
     def save_state(self) -> None:
-        self.registry.save_index()
-        phenotype_path = self.project_root / "phenotype.toml"
-        self.phenotype.save(phenotype_path)
-        tracker_path = self.project_root / "fusion_tracker.json"
-        self.fusion_tracker.save(tracker_path)
+        try:
+            self.registry.save_index()
+        except Exception:
+            logger.error("save_state: failed to save registry", exc_info=True)
+        try:
+            phenotype_path = self.project_root / "phenotype.toml"
+            self.phenotype.save(phenotype_path)
+        except Exception:
+            logger.error("save_state: failed to save phenotype", exc_info=True)
+        try:
+            tracker_path = self.project_root / "fusion_tracker.json"
+            self.fusion_tracker.save(tracker_path)
+        except Exception:
+            logger.error("save_state: failed to save fusion tracker", exc_info=True)
         if self.pathway_fitness_tracker is not None:
-            fitness_path = self.project_root / "pathway_fitness.json"
-            self.pathway_fitness_tracker.save(fitness_path)
+            try:
+                fitness_path = self.project_root / "pathway_fitness.json"
+                self.pathway_fitness_tracker.save(fitness_path)
+            except Exception:
+                logger.error("save_state: failed to save pathway fitness", exc_info=True)
         if self.pathway_registry is not None:
-            self.pathway_registry.save_index()
-        throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
-        with file_lock(throttle_path):
-            atomic_write_text(throttle_path, json.dumps(
-                self._pathway_mutation_throttle.to_dict(), indent=2,
-            ))
-        self.decomposition_detector.save(self._decomposition_path)
-        self._stabilization_tracker.save(
-            self.project_root / ".sg" / "stabilization.json"
-        )
-        self._failure_discovery.save(
-            self.project_root / ".sg" / "failure_discovery.json"
-        )
-        if self.topology_registry is not None:
-            self.topology_registry.save_index()
-        if self._meta_param_tracker is not None:
-            self._meta_param_tracker.save(
-                self.project_root / ".sg" / "meta_params.json"
+            try:
+                self.pathway_registry.save_index()
+            except Exception:
+                logger.error("save_state: failed to save pathway registry", exc_info=True)
+        try:
+            throttle_path = self.project_root / ".sg" / "pathway_mutation_throttle.json"
+            with file_lock(throttle_path):
+                atomic_write_text(throttle_path, json.dumps(
+                    self._pathway_mutation_throttle.to_dict(), indent=2,
+                ))
+        except Exception:
+            logger.error("save_state: failed to save pathway mutation throttle", exc_info=True)
+        try:
+            self.decomposition_detector.save(self._decomposition_path)
+        except Exception:
+            logger.error("save_state: failed to save decomposition detector", exc_info=True)
+        try:
+            self._stabilization_tracker.save(
+                self.project_root / ".sg" / "stabilization.json"
             )
+        except Exception:
+            logger.error("save_state: failed to save stabilization tracker", exc_info=True)
+        try:
+            self._failure_discovery.save(
+                self.project_root / ".sg" / "failure_discovery.json"
+            )
+        except Exception:
+            logger.error("save_state: failed to save failure discovery", exc_info=True)
+        if self.topology_registry is not None:
+            try:
+                self.topology_registry.save_index()
+            except Exception:
+                logger.error("save_state: failed to save topology registry", exc_info=True)
+        if self._meta_param_tracker is not None:
+            try:
+                self._meta_param_tracker.save(
+                    self.project_root / ".sg" / "meta_params.json"
+                )
+            except Exception:
+                logger.error("save_state: failed to save meta params", exc_info=True)

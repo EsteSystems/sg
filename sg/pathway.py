@@ -165,7 +165,7 @@ def execute_pathway(
             step_timings_map[sname] = elapsed_ms
             steps_executed.append(sname)
 
-    except RuntimeError:
+    except Exception:
         failure_step = _step_name(current_step) if current_step is not None else None
         if pathway_fitness_tracker is not None:
             structure_hash = composition_fingerprint(allele_shas) if allele_shas else ""

@@ -10,30 +10,86 @@ See `docs/SOFTWARE-GENOMICS.md` for the full paradigm whitepaper.
 
 ```
 sg/                               # core runtime
-├── cli.py                        # CLI: init, run, status
-├── orchestrator.py               # evolutionary loop
-├── registry.py                   # SHA-256 CAS + JSON index
-├── phenotype.py                  # TOML phenotype map + fusion state
-├── arena.py                      # temporal fitness: immediate + convergence + resilience
-├── loader.py                     # exec()-based gene loading
-├── mutation.py                   # mock + Claude mutation engines
-├── pathway.py                    # pathway execution (fusion-aware, composed, conditional)
-├── fusion.py                     # reinforcement tracking, fuse/decompose
+├── cli.py                        # CLI: init, run, status, lineage, compete
+├── orchestrator.py               # evolutionary loop + allele stack traversal
 ├── contracts.py                  # contract loading, locus types, validation
-├── safety.py                     # transactions, blast radius, rollback
 ├── parser/                       # .sg format parser
 │   ├── types.py                  # AST node types (GeneContract, PathwayContract, etc.)
 │   ├── lexer.py                  # tokenization
 │   └── parser.py                 # AST construction
-└── kernel/                       # gene_sdk — kernel interface
-    ├── base.py                   # NetworkKernel ABC
-    ├── mock.py                   # MockNetworkKernel (dev/test)
-    └── production.py             # ProductionNetworkKernel (NM D-Bus, ip link)
+├── kernel/                       # domain-agnostic kernel interface
+│   ├── base.py                   # Kernel ABC (abstract, domain-agnostic)
+│   ├── discovery.py              # plugin kernel discovery
+│   └── stub.py                   # stub kernel for testing
+│
+│  ── Gene lifecycle ──
+├── registry.py                   # SHA-256 CAS + JSON allele index
+├── phenotype.py                  # TOML phenotype map (gene/pathway/topology alleles + fusion)
+├── loader.py                     # exec()-based gene loading
+├── mutation.py                   # mock + LLM mutation engines
+├── mutation_cache.py             # LLM mutation result caching
+├── arena.py                      # gene fitness: immediate + convergence + resilience
+├── fitness.py                    # per-allele fitness history (bounded)
+│
+│  ── Pathway evolution ──
+├── pathway.py                    # pathway execution (fusion-aware, composed, conditional)
+├── pathway_registry.py           # pathway allele versioning + structure SHAs
+├── pathway_arena.py              # pathway fitness scoring
+├── pathway_fitness.py            # pathway execution timing + failure patterns
+├── pathway_mutation.py           # structural mutation operators (reorder, insert, delete)
+├── fusion.py                     # reinforcement tracking → fuse pathway to single gene
+├── stabilization.py              # post-mutation stabilization tracking
+│
+│  ── Topology evolution ──
+├── topology.py                   # topology composition (resources → pathways/genes)
+├── topology_registry.py          # topology allele versioning + structure SHAs
+├── topology_arena.py             # topology fitness (most conservative thresholds)
+│
+│  ── Error detection & learning ──
+├── decomposition.py              # auto gene splitting on diverse error clusters
+├── regression.py                 # fitness regression detection → proactive mutation
+├── failure_discovery.py          # novel error pattern discovery + mutation proposals
+├── probe.py                      # diagnostic probing of loci
+├── interactions.py               # cross-locus interaction testing before promotion
+│
+│  ── Safety & verification ──
+├── safety.py                     # transactions, blast radius, rollback
+├── conformance.py                # output validation against contract specs
+├── sandbox.py                    # isolated Python execution context
+├── verify.py                     # timer-based verify scheduling (convergence/resilience)
+│
+│  ── Persistence & ops ──
+├── filelock.py                   # file locking (shared/exclusive) + atomic writes
+├── audit.py                      # append-only JSONL event log
+├── meta_params.py                # evolutionary parameter tracking + snapshots
+├── log.py                        # structured logging
+├── scaffold.py                   # project initialization
+├── dashboard.py                  # status dashboard
+├── snapshot.py                   # project state snapshots
+├── diff.py                       # state diffing
+│
+│  ── Multi-organism ──
+├── federation.py                 # peer observation sharing
+├── pool.py                       # gene pool configuration
+└── pool_server.py                # gene pool HTTP server
 
-contracts/                        # .sg contract definitions
-├── genes/                        # gene contracts (bridge_create.sg, etc.)
-├── pathways/                     # pathway contracts
-└── topologies/                   # topology contracts
+plugins/                          # domain-specific plugins
+├── network/                      # network infrastructure domain
+│   ├── sg_network/               # installable package
+│   │   ├── kernel.py             # NetworkKernel ABC
+│   │   ├── mock.py               # MockNetworkKernel (dev/test)
+│   │   ├── production.py         # ProductionNetworkKernel (NM D-Bus, ip link)
+│   │   └── mappers.py            # resource → kernel call mapping
+│   ├── contracts/                # .sg contracts (genes/, pathways/, topologies/)
+│   ├── genes/                    # seed gene implementations (v1)
+│   └── fixtures/                 # mutation fix + fused pathway fixtures
+└── data/                         # data pipeline domain
+    ├── sg_data/                  # installable package
+    │   ├── kernel.py             # DataKernel ABC
+    │   └── mock.py               # MockDataKernel
+    ├── contracts/                # .sg contracts
+    ├── genes/                    # seed gene implementations
+    └── fixtures/                 # mutation fix fixtures
 ```
 
 ## Conventions
@@ -42,16 +98,24 @@ contracts/                        # .sg contract definitions
 - All gene I/O is JSON strings. `gene_sdk` is injected into the gene's namespace at load time.
 - Content addressing: alleles identified by SHA-256 of source code
 - Temporal fitness: immediate (30%) + convergence (50%) + resilience (20%)
-- Promotion: fitness > dominant + 0.1, invocations >= 50
-- Demotion: 3 consecutive failures
-- Fusion: 10 consecutive pathway successes with identical allele composition
+- Composition hierarchy: gene → pathway → topology → intent (each level has progressively more conservative thresholds)
+- Gene promotion: fitness > dominant + 0.1, invocations >= 50
+- Gene demotion: 3 consecutive failures → deprecated
+- Pathway alleles: versioned by structure SHA (normalized step specs). Promotion advantage 0.15, min 200 executions
+- Topology alleles: versioned by decomposition strategy SHA. Promotion advantage 0.20, min 500 executions
+- Fusion: 10 consecutive pathway successes with identical allele composition → fuse to single gene
 - Two gene families: configuration (effectors) and diagnostic (sensors)
+- Decomposition: 10+ errors with 3+ distinct clusters → auto-split gene into sub-gene pathway
+- Interaction detection: cross-locus testing before promotion (configurable policy: warn/rollback/mutate)
+- Batch mutation: multiple diverse candidates per LLM mutation attempt
 - Contracts are `.sg` files with verb-based sections: does, takes, gives, before, after, fails when, verify, feeds
 
 ## Running
 
 ```bash
 pip install -e ".[dev]"
+pip install -e plugins/network
+pip install -e plugins/data    # optional
 pytest
 sg init
 sg run <pathway> --input '{...}'
@@ -65,3 +129,5 @@ sg status
 - **Temporal fitness**: immediate (t=0) + convergence (t=30s) + resilience (t=hours). Retroactive decay when convergence/resilience fail.
 - **Composition hierarchy**: gene → pathway → topology → intent. Pathways compose via `->`, iterate via `for`, bind conditionally via `when`.
 - **Safety**: transactions with undo-log, blast radius classification (none → critical), shadow mode → canary → recessive → dominant allele lifecycle.
+- **Domain-agnostic core**: kernel is an abstract interface. Domain-specific logic lives in plugins (network, data). Contracts, genes, and fixtures are shipped per-plugin.
+- **Operational hardening**: atomic writes (temp file + rename), corrupted state recovery (try/except on all loads), shared read locks, fault-isolated save_state.

@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sg.filelock import atomic_write_bytes, file_lock
+from sg.filelock import atomic_write_bytes, file_lock, file_lock_shared
 from sg.log import get_logger
 
 logger = get_logger("phenotype")
@@ -229,8 +229,9 @@ class PhenotypeMap:
         if not path.exists():
             return pm
         try:
-            with open(path, "rb") as f:
-                data = tomllib.load(f)
+            with file_lock_shared(path):
+                with open(path, "rb") as f:
+                    data = tomllib.load(f)
         except Exception:
             logger.warning("phenotype map corrupted at %s, starting fresh", path)
             return pm

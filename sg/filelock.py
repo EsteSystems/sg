@@ -62,16 +62,38 @@ def file_lock(path: Path, timeout: float = 10.0) -> Generator[None, None, None]:
         yield from _flock_directory(lock_path, timeout)
 
 
+@contextmanager
+def file_lock_shared(path: Path, timeout: float = 10.0) -> Generator[None, None, None]:
+    """Acquire a shared (read) lock on *path* for the duration of the block.
+
+    Multiple readers can hold the shared lock simultaneously, but a writer
+    holding an exclusive lock (via ``file_lock()``) blocks readers.
+
+    On non-Unix platforms, falls back to an exclusive lock.
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import fcntl
+        yield from _flock_unix(lock_path, timeout, fcntl, shared=True)
+    except ImportError:
+        # Directory strategy doesn't support shared locks; use exclusive.
+        yield from _flock_directory(lock_path, timeout)
+
+
 def _flock_unix(
-    lock_path: Path, timeout: float, fcntl
+    lock_path: Path, timeout: float, fcntl,
+    *, shared: bool = False,
 ) -> Generator[None, None, None]:
     """fcntl.flock() implementation (Unix)."""
+    lock_type = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
     deadline = time.monotonic() + timeout
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     try:
         while True:
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, lock_type | fcntl.LOCK_NB)
                 break
             except (IOError, OSError):
                 if time.monotonic() >= deadline:

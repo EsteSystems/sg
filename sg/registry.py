@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 
-from sg.filelock import atomic_write_text, file_lock
+from sg.filelock import atomic_write_text, file_lock, file_lock_shared
 from sg.log import get_logger
 
 logger = get_logger("registry")
@@ -123,7 +123,8 @@ class Registry:
     def load_index(self) -> None:
         if self.index_path.exists():
             try:
-                data = json.loads(self.index_path.read_text())
+                with file_lock_shared(self.index_path):
+                    data = json.loads(self.index_path.read_text())
                 self.alleles = {
                     sha: AlleleMetadata.from_dict(meta)
                     for sha, meta in data.items()

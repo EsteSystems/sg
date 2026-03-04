@@ -350,6 +350,97 @@ def api_contract_evolution(locus: str | None = None):
     return {"proposals": [p.to_dict() for p in proposals]}
 
 
+# ── Contract editor endpoints ─────────────────────────────────────────
+
+@app.get("/api/contract/{name}/raw")
+def api_contract_raw(name: str):
+    """Return raw .sg source and parsed structure for the contract editor."""
+    cs, _, _, _, _, _, _ = _load_state()
+    path = cs.file_path(name)
+    if path is None or not path.exists():
+        return JSONResponse({"error": f"contract '{name}' not found"}, status_code=404)
+    source = path.read_text()
+
+    gene = cs.get_gene(name)
+    pathway = cs.get_pathway(name)
+    topology = cs.get_topology(name)
+    contract = gene or pathway or topology
+
+    ctype = "gene" if gene else ("pathway" if pathway else "topology")
+    parsed = {"type": ctype, "name": name}
+
+    if gene:
+        parsed["family"] = gene.family.value
+        parsed["risk"] = gene.risk.value
+        parsed["domain"] = gene.domain
+        parsed["does"] = gene.does
+        parsed["takes"] = [{"name": f.name, "type": f.type, "description": f.description,
+                            "default": f.default, "optional": f.optional} for f in gene.takes]
+        parsed["gives"] = [{"name": f.name, "type": f.type, "description": f.description,
+                            "optional": f.optional} for f in gene.gives]
+        parsed["connects"] = [{"param": c.param, "interface": c.interface,
+                               "description": c.description} for c in gene.connects]
+        parsed["before"] = gene.before
+        parsed["after"] = gene.after
+        parsed["fails_when"] = gene.fails_when
+        parsed["unhealthy_when"] = gene.unhealthy_when
+        parsed["verify"] = [{"locus": v.locus, "params": v.params} for v in gene.verify]
+        parsed["verify_within"] = gene.verify_within
+        parsed["feeds"] = [{"target_locus": f.target_locus, "timescale": f.timescale}
+                           for f in gene.feeds]
+    elif pathway:
+        parsed["risk"] = pathway.risk.value
+        parsed["domain"] = pathway.domain
+        parsed["does"] = pathway.does
+        parsed["takes"] = [{"name": f.name, "type": f.type, "description": f.description,
+                            "default": f.default, "optional": f.optional} for f in pathway.takes]
+        parsed["steps"] = []
+        for s in pathway.steps:
+            from sg.parser.types import PathwayStep as ASTPathwayStep
+            if isinstance(s, ASTPathwayStep):
+                parsed["steps"].append({"index": s.index, "locus": s.locus, "params": s.params})
+        parsed["on_failure"] = pathway.on_failure
+        parsed["verify"] = [{"locus": v.locus, "params": v.params} for v in pathway.verify]
+        parsed["verify_within"] = pathway.verify_within
+
+    return {"source": source, "parsed": parsed}
+
+
+@app.put("/api/contract/{name}")
+async def api_contract_save(name: str, request: Request):
+    """Save a modified .sg contract source back to disk and reload."""
+    data = await request.json()
+    source = data.get("source", "")
+    if not source.strip():
+        return JSONResponse({"error": "empty contract source"}, status_code=400)
+
+    cs, _, _, _, _, _, _ = _load_state()
+    path = cs.file_path(name)
+
+    # Validate by parsing before saving
+    try:
+        from sg.parser.parser import parse_sg
+        contract = parse_sg(source)
+    except Exception as e:
+        return JSONResponse({"error": f"parse error: {e}"}, status_code=400)
+
+    new_name = contract.name
+    if path is None:
+        # New contract — determine directory from type
+        from sg.parser.types import GeneContract as GC, PathwayContract as PC
+        if isinstance(contract, GC):
+            subdir = "genes"
+        elif isinstance(contract, PC):
+            subdir = "pathways"
+        else:
+            subdir = "topologies"
+        path = _project_root / "contracts" / subdir / f"{new_name}.sg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    path.write_text(source)
+    return {"ok": True, "name": new_name, "path": str(path)}
+
+
 # ── Action endpoints (control plane) ──────────────────────────────────
 
 import asyncio
@@ -943,6 +1034,80 @@ body.detail-open #detail { display:block; }
 /* Heatmap */
 .heatmap { overflow-x:auto; }
 .heatmap svg text { fill:var(--text); font-size:10px; font-family:inherit; }
+
+/* ── Contract Editor ── */
+.ce-modal { display:none; position:fixed; top:2%; left:5%; width:90%; height:94%;
+  background:var(--bg-main); border:1px solid var(--accent); border-radius:6px;
+  z-index:110; display:none; flex-direction:column; }
+.ce-modal.open { display:flex; }
+.ce-bar { display:flex; align-items:center; gap:12px; padding:8px 16px;
+  border-bottom:1px solid var(--border); background:var(--bg-panel); border-radius:6px 6px 0 0; }
+.ce-bar .ce-title { flex:1; font-size:13px; color:var(--accent); font-weight:600; }
+.ce-bar button { background:none; border:1px solid var(--border); color:var(--text);
+  padding:4px 14px; border-radius:3px; cursor:pointer; font-size:11px; font-family:inherit; }
+.ce-bar .btn-save { border-color:var(--success); color:var(--success); }
+.ce-bar .btn-save:hover { background:rgba(0,255,100,0.08); }
+.ce-bar .btn-close { border-color:var(--danger); color:var(--danger); }
+.ce-bar .btn-close:hover { background:rgba(255,80,80,0.08); }
+.ce-bar .ce-status { font-size:10px; color:var(--text-dim); }
+.ce-body { flex:1; overflow:auto; padding:20px 32px; font-family:'SF Mono',Menlo,Consolas,monospace;
+  font-size:12px; line-height:1.8; color:var(--text); }
+
+/* Structural keywords — static, dim */
+.ce-kw { color:#c792ea; user-select:none; }
+.ce-verb { color:#546e7a; user-select:none; }
+.ce-punct { color:#546e7a; user-select:none; }
+.ce-idx { color:#f78c6c; user-select:none; }
+
+/* Inline inputs — bottom-border only */
+.ce-input { background:none; border:none; border-bottom:1px solid #ffffff18;
+  color:var(--text); font-family:inherit; font-size:inherit; line-height:inherit;
+  padding:0 2px; outline:none; transition:border-color 0.15s; }
+.ce-input:hover { border-bottom-color:#ffffff30; background:rgba(255,255,255,0.02); }
+.ce-input:focus { border-bottom-color:var(--accent); background:rgba(100,180,255,0.03); }
+.ce-input.ce-name { color:#ffcb6b; font-weight:600; }
+.ce-input.ce-type { color:#82aaff; width:60px; }
+.ce-input.ce-desc { color:#c3e88d; }
+.ce-input.ce-default { color:#f78c6c; }
+.ce-input.ce-interface { color:#89ddff; width:80px; }
+.ce-input.ce-value { color:var(--text); }
+.ce-input.ce-domain { color:#c3e88d; }
+
+/* Select styled as input */
+.ce-select { background:none; border:none; border-bottom:1px solid #ffffff18;
+  color:var(--text); font-family:inherit; font-size:inherit; line-height:inherit;
+  padding:0 2px; outline:none; cursor:pointer; -webkit-appearance:none; appearance:none;
+  transition:border-color 0.15s; }
+.ce-select:hover { border-bottom-color:#ffffff30; }
+.ce-select:focus { border-bottom-color:var(--accent); }
+.ce-select.ce-family { color:#c792ea; }
+.ce-select.ce-risk { color:#f78c6c; }
+.ce-select option { background:var(--bg-panel); color:var(--text); }
+
+/* Prose textarea */
+.ce-prose { background:none; border:none; border-bottom:1px solid #ffffff18;
+  color:var(--text); font-family:inherit; font-size:inherit; line-height:inherit;
+  padding:0 2px; outline:none; width:100%; resize:vertical; min-height:2.4em;
+  transition:border-color 0.15s; }
+.ce-prose:hover { border-bottom-color:#ffffff30; background:rgba(255,255,255,0.02); }
+.ce-prose:focus { border-bottom-color:var(--accent); background:rgba(100,180,255,0.03); }
+
+/* Section structure */
+.ce-section { margin-bottom:4px; }
+.ce-line { white-space:pre; min-height:1.8em; }
+.ce-indent { display:inline; }
+.ce-add-btn { display:inline-block; color:var(--text-dim); cursor:pointer; font-size:10px;
+  border:1px dashed #ffffff15; padding:1px 8px; border-radius:2px; margin-left:4px;
+  user-select:none; transition:all 0.15s; }
+.ce-add-btn:hover { color:var(--accent); border-color:var(--accent); background:rgba(100,180,255,0.04); }
+.ce-remove-btn { display:inline-block; color:var(--danger); opacity:0; cursor:pointer;
+  font-size:9px; margin-left:4px; user-select:none; transition:opacity 0.15s; }
+.ce-line:hover .ce-remove-btn { opacity:0.5; }
+.ce-remove-btn:hover { opacity:1 !important; }
+
+/* Section add buttons at bottom */
+.ce-add-section { margin-top:8px; }
+.ce-add-section .ce-add-btn { font-size:11px; padding:2px 12px; }
 </style>
 </head><body>
 
@@ -1067,6 +1232,17 @@ body.detail-open #detail { display:block; }
   <button class="close-btn" onclick="closeModal()">&times;</button>
   <h3 id="source-title"></h3>
   <pre id="source-code"></pre>
+</div>
+
+<!-- Contract Editor Modal -->
+<div class="ce-modal" id="contract-editor">
+  <div class="ce-bar">
+    <span class="ce-title" id="ce-title">Contract Editor</span>
+    <span class="ce-status" id="ce-status"></span>
+    <button class="btn-save" onclick="ceEditorSave()">Save</button>
+    <button class="btn-close" onclick="ceEditorClose()">Close</button>
+  </div>
+  <div class="ce-body" id="ce-body"></div>
 </div>
 
 <script>
@@ -1878,6 +2054,7 @@ async function renderDetail() {
         <div style="color:var(--text-dim);font-size:11px;margin-bottom:4px">${c.does||''}</div>
         <div class="kv"><span class="k">Family</span><span>${c.family}</span></div>
         <div class="kv"><span class="k">Risk</span><span>${c.risk}</span></div>
+        <button style="margin-top:6px;background:none;border:1px solid var(--accent);color:var(--accent);padding:3px 12px;border-radius:3px;cursor:pointer;font-size:10px;font-family:inherit" onclick="ceEditorOpen('${sel.name}')">Edit Contract</button>
       </div>`:''}
       ${dom?`<div class="section"><h5>Dominant Allele</h5>
         <div class="kv"><span class="k">SHA</span><a onclick="showSource('${dom.sha}')">${dom.sha}</a></div>
@@ -1910,6 +2087,7 @@ async function renderDetail() {
         <div class="kv"><span class="k">Fused</span><span>${pw?.fused?'Yes':'No'}</span></div>
         <div class="kv"><span class="k">Reinforcement</span><span>${pw?.reinforcement_count||0}/10</span></div>
         <div class="kv"><span class="k">Alleles</span><span>${pw?.pathway_allele_count||0}</span></div>
+        <button style="margin-top:6px;background:none;border:1px solid var(--accent);color:var(--accent);padding:3px 12px;border-radius:3px;cursor:pointer;font-size:10px;font-family:inherit" onclick="ceEditorOpen('${sel.name}')">Edit Contract</button>
       </div>`;
   }
 }
@@ -1948,6 +2126,432 @@ async function showSource(sha) {
 
 function closeModal() {
   document.getElementById('source-modal').classList.remove('open');
+}
+
+// ══════════════════════════════════════════
+// CONTRACT EDITOR
+// ══════════════════════════════════════════
+let _ceData = null;
+
+async function ceEditorOpen(name) {
+  const resp = await fetchJSON('/api/contract/' + name + '/raw');
+  if(!resp || resp.error) { showToast('Error', resp?.error || 'Failed to load', true); return; }
+  _ceData = resp;
+  document.getElementById('ce-title').textContent = resp.parsed.type + ' : ' + name;
+  document.getElementById('ce-status').textContent = '';
+  ceRender(resp.parsed);
+  document.getElementById('contract-editor').classList.add('open');
+}
+
+function ceEditorClose() {
+  document.getElementById('contract-editor').classList.remove('open');
+  _ceData = null;
+}
+
+function ceRender(p) {
+  const body = document.getElementById('ce-body');
+  let html = '';
+  if(p.type === 'gene') {
+    html = ceRenderGene(p);
+  } else if(p.type === 'pathway') {
+    html = ceRenderPathway(p);
+  }
+  body.innerHTML = html;
+  ceAutosize();
+}
+
+function _esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function _inp(cls, name, val, extra) { extra=extra||''; return `<input class="ce-input ${cls}" data-field="${name}" value="${_esc(val)}" ${extra}>`; }
+function _sel(cls, name, val, opts) {
+  let h = `<select class="ce-select ${cls}" data-field="${name}">`;
+  opts.forEach(o => { h += `<option value="${o}"${o===val?' selected':''}>${o}</option>`; });
+  return h + '</select>';
+}
+
+function ceRenderGene(p) {
+  let h = '';
+  // Header: gene name for domain
+  h += `<div class="ce-line"><span class="ce-kw">gene</span> ${_inp('ce-name','name',p.name)} <span class="ce-kw">for</span> ${_inp('ce-domain','domain',p.domain||'')}</div>`;
+  // is
+  h += `<div class="ce-line">  ${_sel('ce-family','family',p.family,['configuration','diagnostic'])}</div>`;
+  // risk
+  h += `<div class="ce-line">  <span class="ce-kw">risk</span> ${_sel('ce-risk','risk',p.risk,['none','low','medium','high','critical'])}</div>`;
+  h += '<div class="ce-line"></div>';
+  // does
+  h += `<div class="ce-line">  <span class="ce-verb">does:</span></div>`;
+  h += `<div class="ce-line">    <textarea class="ce-prose" data-field="does" rows="${Math.max(2,(p.does||'').split('\\n').length)}">${_esc(p.does||'')}</textarea></div>`;
+  h += '<div class="ce-line"></div>';
+  // takes
+  if(p.takes && p.takes.length > 0) {
+    h += `<div class="ce-line">  <span class="ce-verb">takes:</span></div>`;
+    p.takes.forEach((f,i) => {
+      h += '<div class="ce-line">    ';
+      h += _inp('ce-name','takes.'+i+'.name',f.name,'style="width:'+Math.max(80,f.name.length*8)+'px"');
+      h += '  ' + _inp('ce-type','takes.'+i+'.type',f.type);
+      h += '  <span class="ce-punct">&quot;</span>' + _inp('ce-desc','takes.'+i+'.description',f.description,'style="width:'+Math.max(120,(f.description||'').length*7)+'px"') + '<span class="ce-punct">&quot;</span>';
+      if(f.default !== null && f.default !== undefined) {
+        h += '  <span class="ce-punct">default=</span><span class="ce-punct">&quot;</span>' + _inp('ce-default','takes.'+i+'.default',f.default,'style="width:'+Math.max(100,(f.default||'').length*7)+'px"') + '<span class="ce-punct">&quot;</span>';
+      }
+      h += `<span class="ce-remove-btn" onclick="ceRemoveField('takes',${i})">&#x2715;</span>`;
+      h += '</div>';
+    });
+    h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddField('takes')">+ field</span></div>`;
+    h += '<div class="ce-line"></div>';
+  }
+  // gives
+  if(p.gives && p.gives.length > 0) {
+    h += `<div class="ce-line">  <span class="ce-verb">gives:</span></div>`;
+    p.gives.forEach((f,i) => {
+      h += '<div class="ce-line">    ';
+      h += _inp('ce-name','gives.'+i+'.name',f.name,'style="width:'+Math.max(80,f.name.length*8)+'px"');
+      h += '  ' + _inp('ce-type','gives.'+i+'.type',f.type);
+      if(f.optional) h += '<span class="ce-punct">?</span>';
+      h += '  <span class="ce-punct">&quot;</span>' + _inp('ce-desc','gives.'+i+'.description',f.description,'style="width:'+Math.max(120,(f.description||'').length*7)+'px"') + '<span class="ce-punct">&quot;</span>';
+      h += `<span class="ce-remove-btn" onclick="ceRemoveField('gives',${i})">&#x2715;</span>`;
+      h += '</div>';
+    });
+    h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddField('gives')">+ field</span></div>`;
+    h += '<div class="ce-line"></div>';
+  }
+  // connects
+  if(p.connects && p.connects.length > 0) {
+    h += `<div class="ce-line">  <span class="ce-verb">connects:</span></div>`;
+    p.connects.forEach((c,i) => {
+      h += '<div class="ce-line">    ';
+      h += _inp('ce-name','connects.'+i+'.param',c.param,'style="width:'+Math.max(80,c.param.length*8)+'px"');
+      h += '  ' + _inp('ce-interface','connects.'+i+'.interface',c.interface);
+      h += '  <span class="ce-punct">&quot;</span>' + _inp('ce-desc','connects.'+i+'.description',c.description,'style="width:'+Math.max(120,(c.description||'').length*7)+'px"') + '<span class="ce-punct">&quot;</span>';
+      h += `<span class="ce-remove-btn" onclick="ceRemoveField('connects',${i})">&#x2715;</span>`;
+      h += '</div>';
+    });
+    h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddField('connects')">+ interface</span></div>`;
+    h += '<div class="ce-line"></div>';
+  }
+  // before
+  h += ceRenderBulletSection(p, 'before', 'before');
+  // after
+  h += ceRenderBulletSection(p, 'after', 'after');
+  // fails when
+  h += ceRenderBulletSection(p, 'fails_when', 'fails when');
+  // unhealthy when
+  h += ceRenderBulletSection(p, 'unhealthy_when', 'unhealthy when');
+  // verify
+  if(p.verify && p.verify.length > 0) {
+    h += `<div class="ce-line">  <span class="ce-verb">verify:</span></div>`;
+    p.verify.forEach((v,i) => {
+      let params = Object.entries(v.params||{}).map(([k,val]) => k+'='+val).join(' ');
+      h += '<div class="ce-line">    ';
+      h += _inp('ce-value','verify.'+i+'.locus',v.locus,'style="width:'+Math.max(100,v.locus.length*8)+'px"');
+      h += ' ' + _inp('ce-value','verify.'+i+'.params',params,'style="width:'+Math.max(150,params.length*7)+'px"');
+      h += '</div>';
+    });
+    if(p.verify_within) {
+      h += `<div class="ce-line">    <span class="ce-kw">within</span> ${_inp('ce-value','verify_within',p.verify_within,'style="width:40px"')}</div>`;
+    }
+    h += '<div class="ce-line"></div>';
+  }
+  // feeds
+  if(p.feeds && p.feeds.length > 0) {
+    h += `<div class="ce-line">  <span class="ce-verb">feeds:</span></div>`;
+    p.feeds.forEach((f,i) => {
+      h += '<div class="ce-line">    ';
+      h += _inp('ce-name','feeds.'+i+'.target_locus',f.target_locus,'style="width:'+Math.max(100,f.target_locus.length*8)+'px"');
+      h += ' ' + _sel('ce-risk','feeds.'+i+'.timescale',f.timescale,['immediate','convergence','resilience']);
+      h += `<span class="ce-remove-btn" onclick="ceRemoveField('feeds',${i})">&#x2715;</span>`;
+      h += '</div>';
+    });
+    h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddField('feeds')">+ feed</span></div>`;
+    h += '<div class="ce-line"></div>';
+  }
+  // Add missing sections
+  h += '<div class="ce-add-section">';
+  if(!p.connects || p.connects.length === 0) h += '<span class="ce-add-btn" onclick="ceAddSection(\'connects\')">+ connects</span> ';
+  if(!p.before || p.before.length === 0) h += '<span class="ce-add-btn" onclick="ceAddSection(\'before\')">+ before</span> ';
+  if(!p.after || p.after.length === 0) h += '<span class="ce-add-btn" onclick="ceAddSection(\'after\')">+ after</span> ';
+  if(!p.fails_when || p.fails_when.length === 0) h += '<span class="ce-add-btn" onclick="ceAddSection(\'fails_when\')">+ fails when</span> ';
+  if(!p.feeds || p.feeds.length === 0) h += '<span class="ce-add-btn" onclick="ceAddSection(\'feeds\')">+ feeds</span> ';
+  if(!p.verify || p.verify.length === 0) h += '<span class="ce-add-btn" onclick="ceAddSection(\'verify\')">+ verify</span> ';
+  h += '</div>';
+  return h;
+}
+
+function ceRenderPathway(p) {
+  let h = '';
+  h += `<div class="ce-line"><span class="ce-kw">pathway</span> ${_inp('ce-name','name',p.name)} <span class="ce-kw">for</span> ${_inp('ce-domain','domain',p.domain||'')}</div>`;
+  h += `<div class="ce-line">  <span class="ce-kw">risk</span> ${_sel('ce-risk','risk',p.risk,['none','low','medium','high','critical'])}</div>`;
+  h += '<div class="ce-line"></div>';
+  h += `<div class="ce-line">  <span class="ce-verb">does:</span></div>`;
+  h += `<div class="ce-line">    <textarea class="ce-prose" data-field="does" rows="${Math.max(2,(p.does||'').split('\\n').length)}">${_esc(p.does||'')}</textarea></div>`;
+  h += '<div class="ce-line"></div>';
+  // takes with defaults
+  if(p.takes && p.takes.length > 0) {
+    h += `<div class="ce-line">  <span class="ce-verb">takes:</span></div>`;
+    p.takes.forEach((f,i) => {
+      h += '<div class="ce-line">    ';
+      h += _inp('ce-name','takes.'+i+'.name',f.name,'style="width:'+Math.max(80,f.name.length*8)+'px"');
+      h += '  ' + _inp('ce-type','takes.'+i+'.type',f.type);
+      h += '  <span class="ce-punct">&quot;</span>' + _inp('ce-desc','takes.'+i+'.description',f.description,'style="width:'+Math.max(120,(f.description||'').length*7)+'px"') + '<span class="ce-punct">&quot;</span>';
+      if(f.default !== null && f.default !== undefined) {
+        h += '  <span class="ce-punct">default=</span><span class="ce-punct">&quot;</span>' + _inp('ce-default','takes.'+i+'.default',f.default,'style="width:'+Math.max(100,(f.default||'').length*7)+'px"') + '<span class="ce-punct">&quot;</span>';
+      } else {
+        h += `  <span class="ce-add-btn" onclick="ceAddDefault(${i})" style="font-size:9px">+default</span>`;
+      }
+      h += `<span class="ce-remove-btn" onclick="ceRemoveField('takes',${i})">&#x2715;</span>`;
+      h += '</div>';
+    });
+    h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddField('takes')">+ field</span></div>`;
+    h += '<div class="ce-line"></div>';
+  }
+  // steps (read-only structure, editable locus names and params)
+  if(p.steps && p.steps.length > 0) {
+    h += `<div class="ce-line">  <span class="ce-verb">steps:</span></div>`;
+    p.steps.forEach((s,i) => {
+      h += `<div class="ce-line">    <span class="ce-idx">${s.index}.</span> ${_inp('ce-name','steps.'+i+'.locus',s.locus,'style="width:'+Math.max(100,s.locus.length*8)+'px"')}</div>`;
+      if(s.params) {
+        Object.entries(s.params).forEach(([k,v]) => {
+          h += `<div class="ce-line">         ${_inp('ce-value','steps.'+i+'.params.'+k+'._key',k,'style="width:'+Math.max(60,k.length*8)+'px"')} <span class="ce-punct">=</span> ${_inp('ce-value','steps.'+i+'.params.'+k+'._val',v,'style="width:'+Math.max(60,v.length*8)+'px"')}</div>`;
+        });
+      }
+    });
+    h += '<div class="ce-line"></div>';
+  }
+  // on failure
+  if(p.on_failure) {
+    h += `<div class="ce-line">  <span class="ce-verb">on failure:</span></div>`;
+    h += `<div class="ce-line">    ${_inp('ce-value','on_failure',p.on_failure,'style="width:200px"')}</div>`;
+  }
+  return h;
+}
+
+function ceRenderBulletSection(p, field, label) {
+  const items = p[field];
+  if(!items || items.length === 0) return '';
+  let h = `<div class="ce-line">  <span class="ce-verb">${_esc(label)}:</span></div>`;
+  items.forEach((item,i) => {
+    h += '<div class="ce-line">    <span class="ce-punct">-</span> ';
+    h += _inp('ce-value',field+'.'+i,item,'style="width:'+Math.max(200,item.length*7)+'px"');
+    h += `<span class="ce-remove-btn" onclick="ceRemoveBullet('${field}',${i})">&#x2715;</span>`;
+    h += '</div>';
+  });
+  h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddBullet('${field}')">+ item</span></div>`;
+  h += '<div class="ce-line"></div>';
+  return h;
+}
+
+function ceAutosize() {
+  document.querySelectorAll('.ce-prose').forEach(ta => {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  });
+}
+
+// ── Mutations ──
+function ceCollectParsed() {
+  const p = JSON.parse(JSON.stringify(_ceData.parsed));
+  document.querySelectorAll('.ce-input, .ce-select, .ce-prose').forEach(el => {
+    const field = el.dataset.field;
+    if(!field) return;
+    const val = el.value;
+    const parts = field.split('.');
+    if(parts.length === 1) {
+      p[parts[0]] = val;
+    } else if(parts.length === 3) {
+      const [sec, idx, key] = parts;
+      if(!p[sec]) return;
+      const i = parseInt(idx);
+      if(p[sec][i] !== undefined) p[sec][i][key] = val;
+    } else if(parts.length === 5 && parts[3] === '_key') {
+      // skip — handled by _val
+    } else if(parts.length === 5 && parts[3] === '_val') {
+      // NOT IMPLEMENTED
+    }
+  });
+  return p;
+}
+
+function ceReconstructSource(p) {
+  let lines = [];
+  if(p.type === 'gene') {
+    lines.push('gene ' + p.name + (p.domain ? ' for ' + p.domain : ''));
+    lines.push('  is ' + p.family);
+    lines.push('  risk ' + p.risk);
+    lines.push('');
+    if(p.does) {
+      lines.push('  does:');
+      p.does.split('\\n').forEach(l => lines.push('    ' + l));
+      lines.push('');
+    }
+    if(p.takes && p.takes.length) {
+      lines.push('  takes:');
+      p.takes.forEach(f => {
+        let line = '    ' + f.name + '  ' + f.type;
+        if(f.optional && f.type && !f.type.endsWith('?')) line = '    ' + f.name + '  ' + f.type + '?';
+        if(f.description) line += '  "' + f.description + '"';
+        if(f.default !== null && f.default !== undefined && f.default !== '') line += '  default="' + f.default + '"';
+        lines.push(line);
+      });
+      lines.push('');
+    }
+    if(p.gives && p.gives.length) {
+      lines.push('  gives:');
+      p.gives.forEach(f => {
+        let t = f.type + (f.optional ? '?' : '');
+        let line = '    ' + f.name + '  ' + t;
+        if(f.description) line += '  "' + f.description + '"';
+        lines.push(line);
+      });
+      lines.push('');
+    }
+    if(p.connects && p.connects.length) {
+      lines.push('  connects:');
+      p.connects.forEach(c => {
+        let line = '    ' + c.param + '  ' + c.interface;
+        if(c.description) line += '  "' + c.description + '"';
+        lines.push(line);
+      });
+      lines.push('');
+    }
+    ['before','after','fails_when','unhealthy_when'].forEach(sec => {
+      if(p[sec] && p[sec].length) {
+        const label = sec.replace('_',' ');
+        lines.push('  ' + label + ':');
+        p[sec].forEach(item => lines.push('    - ' + item));
+        lines.push('');
+      }
+    });
+    if(p.verify && p.verify.length) {
+      lines.push('  verify:');
+      p.verify.forEach(v => {
+        let params = Object.entries(v.params||{}).map(([k,val]) => k + '=' + val).join(' ');
+        lines.push('    ' + v.locus + (params ? ' ' + params : ''));
+      });
+      if(p.verify_within) lines.push('    within ' + p.verify_within);
+      lines.push('');
+    }
+    if(p.feeds && p.feeds.length) {
+      lines.push('  feeds:');
+      p.feeds.forEach(f => lines.push('    ' + f.target_locus + ' ' + f.timescale));
+      lines.push('');
+    }
+  } else if(p.type === 'pathway') {
+    lines.push('pathway ' + p.name + (p.domain ? ' for ' + p.domain : ''));
+    lines.push('  risk ' + p.risk);
+    lines.push('');
+    if(p.does) {
+      lines.push('  does:');
+      p.does.split('\\n').forEach(l => lines.push('    ' + l));
+      lines.push('');
+    }
+    if(p.takes && p.takes.length) {
+      lines.push('  takes:');
+      p.takes.forEach(f => {
+        let line = '    ' + f.name + '  ' + f.type;
+        if(f.description) line += '  "' + f.description + '"';
+        if(f.default !== null && f.default !== undefined && f.default !== '') line += '  default="' + f.default + '"';
+        lines.push(line);
+      });
+      lines.push('');
+    }
+    if(p.steps && p.steps.length) {
+      lines.push('  steps:');
+      p.steps.forEach(s => {
+        lines.push('    ' + s.index + '. ' + s.locus);
+        if(s.params) {
+          Object.entries(s.params).forEach(([k,v]) => {
+            lines.push('         ' + k + ' = ' + v);
+          });
+        }
+      });
+      lines.push('');
+    }
+    if(p.on_failure) {
+      lines.push('  on failure:');
+      lines.push('    ' + p.on_failure);
+    }
+  }
+  return lines.join('\\n') + '\\n';
+}
+
+function ceAddField(section) {
+  const p = ceCollectParsed();
+  if(!p[section]) p[section] = [];
+  if(section === 'takes' || section === 'gives') {
+    p[section].push({name:'new_field', type:'string', description:'', default:null, optional:false});
+  } else if(section === 'connects') {
+    p[section].push({param:'param', interface:'https', description:''});
+  } else if(section === 'feeds') {
+    p[section].push({target_locus:'locus_name', timescale:'convergence'});
+  }
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+function ceRemoveField(section, idx) {
+  const p = ceCollectParsed();
+  if(p[section]) { p[section].splice(idx, 1); }
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+function ceAddBullet(field) {
+  const p = ceCollectParsed();
+  if(!p[field]) p[field] = [];
+  p[field].push('new condition');
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+function ceRemoveBullet(field, idx) {
+  const p = ceCollectParsed();
+  if(p[field]) { p[field].splice(idx, 1); }
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+function ceAddSection(section) {
+  const p = ceCollectParsed();
+  if(section === 'connects') p.connects = [{param:'param', interface:'https', description:''}];
+  else if(section === 'feeds') p.feeds = [{target_locus:'locus_name', timescale:'convergence'}];
+  else if(section === 'verify') p.verify = [{locus:'check_name', params:{}}];
+  else p[section] = ['condition'];
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+function ceAddDefault(idx) {
+  const p = ceCollectParsed();
+  if(p.takes && p.takes[idx]) { p.takes[idx].default = ''; }
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+async function ceEditorSave() {
+  const p = ceCollectParsed();
+  const source = ceReconstructSource(p);
+  const statusEl = document.getElementById('ce-status');
+  statusEl.textContent = 'Saving...';
+
+  try {
+    const resp = await fetch('/api/contract/' + _ceData.parsed.name, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source}),
+    });
+    const data = await resp.json();
+    if(data.error) {
+      statusEl.textContent = 'Error: ' + data.error;
+      statusEl.style.color = 'var(--danger)';
+    } else {
+      statusEl.textContent = 'Saved';
+      statusEl.style.color = 'var(--success)';
+      _ceData.parsed.name = data.name;
+      setTimeout(() => { statusEl.textContent = ''; statusEl.style.color = ''; }, 2000);
+      refreshData();
+    }
+  } catch(e) {
+    statusEl.textContent = 'Error: ' + e.message;
+    statusEl.style.color = 'var(--danger)';
+  }
 }
 
 // ── URL Hash State ──

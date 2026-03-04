@@ -88,6 +88,7 @@ class ContractStore:
         self.pathways: dict[str, PathwayContract] = {}
         self.topologies: dict[str, TopologyContract] = {}
         self._info_cache: dict[str, ContractInfo] = {}
+        self._file_paths: dict[str, Path] = {}
 
     def load_directory(self, contracts_dir: Path) -> None:
         """Discover and parse all .sg files in a directory tree."""
@@ -116,10 +117,13 @@ class ContractStore:
         if isinstance(contract, GeneContract):
             self.genes[contract.name] = contract
             self._info_cache[contract.name] = _gene_contract_to_info(contract)
+            self._file_paths[contract.name] = path
         elif isinstance(contract, PathwayContract):
             self.pathways[contract.name] = contract
+            self._file_paths[contract.name] = path
         elif isinstance(contract, TopologyContract):
             self.topologies[contract.name] = contract
+            self._file_paths[contract.name] = path
 
     def contract_info(self, locus: str) -> ContractInfo:
         """Return runtime contract metadata for a gene locus."""
@@ -148,6 +152,10 @@ class ContractStore:
     def known_topologies(self) -> list[str]:
         """Return all known topology names."""
         return list(self.topologies.keys())
+
+    def file_path(self, name: str) -> Path | None:
+        """Return the .sg file path for a contract, or None if unknown."""
+        return self._file_paths.get(name)
 
     def register_contract(self, source: str, path: Path) -> str:
         """Write a contract source to disk and load it. Returns the contract name."""

@@ -31,7 +31,8 @@ sg/                               # core runtime
 ├── arena.py                      # gene fitness: immediate + convergence + resilience
 ├── fitness.py                    # per-allele fitness history (bounded)
 │
-│  ── Pathway evolution ──
+│  ── Pipeline & Pathway ──
+├── pipeline.py                   # pipeline runtime (source/sink binding, input auto-construction)
 ├── pathway.py                    # pathway execution (fusion-aware, composed, conditional)
 ├── pathway_registry.py           # pathway allele versioning + structure SHAs
 ├── pathway_arena.py              # pathway fitness scoring
@@ -91,7 +92,7 @@ plugins/                          # domain-specific plugins
 │   ├── sg_data/                  # installable package
 │   │   ├── kernel.py             # DataKernel ABC
 │   │   └── mock.py               # MockDataKernel (dev/test)
-│   ├── contracts/                # .sg contracts (genes/, pathways/)
+│   ├── contracts/                # .sg contracts (genes/, pathways/, pipelines/)
 │   ├── genes/                    # seed gene implementations
 │   └── fixtures/                 # mutation fix fixtures
 └── network/                      # network infrastructure domain (shelved)
@@ -115,6 +116,7 @@ plugins/                          # domain-specific plugins
 - Interaction detection: cross-locus testing before promotion (configurable policy: warn/rollback/mutate)
 - Batch mutation: multiple diverse candidates per LLM mutation attempt
 - Contracts are `.sg` files with verb-based sections: does, takes, gives, before, after, fails when, verify, feeds
+- Pipelines are `.sg` files that bind sources and sinks to pathways: source, sink, through, bind, schedule
 
 ## Running
 
@@ -124,6 +126,8 @@ pip install -e plugins/data
 pytest
 sg init --kernel data-mock
 sg run ingest_and_validate --input '{...}'
+sg pipeline list
+sg pipeline run ingest_airtravel
 sg status
 ```
 
@@ -132,7 +136,7 @@ sg status
 - **`.sg` contract format**: purpose-built for this paradigm. Verb-based sections (`does`, `takes`, `gives`). Domain experts author contracts, not developers.
 - **Two gene families**: configuration genes act, diagnostic genes observe. Diagnostics produce the fitness signal for configuration genes.
 - **Temporal fitness**: immediate (t=0) + convergence (t=30s) + resilience (t=hours). Retroactive decay when convergence/resilience fail.
-- **Composition hierarchy**: gene → pathway → topology → intent. Pathways compose via `->`, iterate via `for`, bind conditionally via `when`.
+- **Composition hierarchy**: gene → pathway → pipeline → topology → intent. Pipelines bind pathways to concrete data sources and sinks. Pathways compose via `->`, iterate via `for`, bind conditionally via `when`.
 - **Safety**: transactions with undo-log, blast radius classification (none → critical), shadow mode → canary → recessive → dominant allele lifecycle.
 - **Domain-agnostic core**: kernel is an abstract interface. Domain-specific logic lives in plugins. The active plugin is `data` (data pipelines). The `network` plugin validated the architecture but is shelved.
 - **Operational hardening**: atomic writes (temp file + rename), corrupted state recovery (try/except on all loads), shared read locks, fault-isolated save_state.

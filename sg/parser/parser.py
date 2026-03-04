@@ -9,9 +9,10 @@ from sg.parser.lexer import Token, TokenType, tokenize
 from sg.parser.types import (
     GeneFamily, BlastRadius,
     FieldDef, TypeDef, VerifyStep, FeedsDef,
-    GeneContract, PathwayContract, TopologyContract,
+    GeneContract, PathwayContract, TopologyContract, PipelineContract,
     PathwayStep as ASTPathwayStep, ForStep, ConditionalStep,
     Dependency, TopologyResource,
+    SourceDecl, SinkDecl, SourceType, SinkType,
 )
 
 
@@ -65,23 +66,26 @@ class Parser:
             "is", "risk", "does", "takes", "gives", "types",
             "before", "after", "fails when", "unhealthy when",
             "verify", "feeds", "steps", "requires", "on failure", "has",
+            "source", "sink", "through", "bind", "schedule", "schema",
         )
 
     # --- Top level ---
 
-    def parse(self) -> GeneContract | PathwayContract | TopologyContract:
+    def parse(self) -> GeneContract | PathwayContract | TopologyContract | PipelineContract:
         self.skip_newlines()
         tok = self.peek()
         if tok.type != TokenType.KEYWORD:
-            raise ParseError(f"expected 'gene', 'pathway', or 'topology'", tok)
+            raise ParseError(f"expected 'gene', 'pathway', 'topology', or 'pipeline'", tok)
         if tok.value == "gene":
             return self.parse_gene()
         elif tok.value == "pathway":
             return self.parse_pathway()
         elif tok.value == "topology":
             return self.parse_topology()
+        elif tok.value == "pipeline":
+            return self.parse_pipeline()
         else:
-            raise ParseError(f"expected 'gene', 'pathway', or 'topology', got {tok.value!r}", tok)
+            raise ParseError(f"expected 'gene', 'pathway', 'topology', or 'pipeline', got {tok.value!r}", tok)
 
     # --- Gene contract ---
 
@@ -343,6 +347,191 @@ class Parser:
             verify_within=verify_within,
             on_failure=on_failure,
         )
+
+    # --- Pipeline contract ---
+
+    def parse_pipeline(self) -> PipelineContract:
+        self.expect(TokenType.KEYWORD, "pipeline")
+        name = self.expect(TokenType.IDENTIFIER).value
+        domain = self._parse_domain_clause()
+        self.skip_newlines()
+
+        does = ""
+        source: SourceDecl | None = None
+        sink: SinkDecl | None = None
+        through = ""
+        bind: dict[str, str] = {}
+        schedule: str | None = None
+        verify: list[VerifyStep] = []
+        verify_within: str | None = None
+
+        if self.peek().type == TokenType.INDENT:
+            self.advance()
+
+        while not self.at_end() and self.peek().type != TokenType.DEDENT:
+            self.skip_newlines()
+            if self.at_end() or self.peek().type == TokenType.DEDENT:
+                break
+
+            tok = self.peek()
+            if tok.type != TokenType.KEYWORD:
+                self._skip_to_newline()
+                continue
+
+            section = tok.value
+            self.advance()
+
+            if section == "does":
+                self.expect(TokenType.COLON)
+                self._consume_newline()
+                does = self._parse_prose_block()
+            elif section == "source":
+                source = self._parse_source_block()
+            elif section == "sink":
+                sink = self._parse_sink_block()
+            elif section == "through":
+                through = self._parse_through()
+            elif section == "bind":
+                self.expect(TokenType.COLON)
+                self._consume_newline()
+                bind = self._parse_bind_block()
+            elif section == "schedule":
+                schedule = self._read_rest_of_line().strip()
+            elif section == "verify":
+                self.expect(TokenType.COLON)
+                self._consume_newline()
+                verify, verify_within = self._parse_verify_block()
+            else:
+                self._skip_to_newline()
+
+        if self.peek().type == TokenType.DEDENT:
+            self.advance()
+
+        return PipelineContract(
+            name=name,
+            does=does,
+            domain=domain,
+            source=source,
+            sink=sink,
+            through=through,
+            bind=bind,
+            schedule=schedule,
+            verify=verify,
+            verify_within=verify_within,
+        )
+
+    def _parse_source_block(self) -> SourceDecl:
+        """Parse: source <type>\\n  key value ..."""
+        type_name = self.expect(TokenType.IDENTIFIER).value
+        try:
+            source_type = SourceType(type_name)
+        except ValueError:
+            source_type = SourceType(type_name.replace("-", "_"))
+        self._consume_newline()
+
+        properties: dict[str, str] = {}
+        schema_fields: list[FieldDef] = []
+
+        if self.peek().type == TokenType.INDENT:
+            self.advance()
+            while not self.at_end() and self.peek().type != TokenType.DEDENT:
+                self.skip_newlines()
+                if self.at_end() or self.peek().type == TokenType.DEDENT:
+                    break
+
+                tok = self.peek()
+                if tok.type == TokenType.KEYWORD and tok.value == "schema":
+                    self.advance()
+                    if self.peek().type == TokenType.COLON:
+                        self.advance()
+                    self._consume_newline()
+                    schema_fields = self._parse_field_defs()
+                elif tok.type in (TokenType.IDENTIFIER, TokenType.KEYWORD):
+                    key = self.advance().value
+                    val = self._read_rest_of_line().strip().strip('"')
+                    properties[key] = val
+                else:
+                    self._skip_to_newline()
+
+            if self.peek().type == TokenType.DEDENT:
+                self.advance()
+
+        return SourceDecl(
+            source_type=source_type,
+            properties=properties,
+            schema_fields=schema_fields,
+        )
+
+    def _parse_sink_block(self) -> SinkDecl:
+        """Parse: sink <type>\\n  key value ..."""
+        type_name = self.expect(TokenType.IDENTIFIER).value
+        try:
+            sink_type = SinkType(type_name)
+        except ValueError:
+            sink_type = SinkType(type_name.replace("-", "_"))
+        self._consume_newline()
+
+        properties: dict[str, str] = {}
+        schema_fields: list[FieldDef] = []
+
+        if self.peek().type == TokenType.INDENT:
+            self.advance()
+            while not self.at_end() and self.peek().type != TokenType.DEDENT:
+                self.skip_newlines()
+                if self.at_end() or self.peek().type == TokenType.DEDENT:
+                    break
+
+                tok = self.peek()
+                if tok.type == TokenType.KEYWORD and tok.value == "schema":
+                    self.advance()
+                    if self.peek().type == TokenType.COLON:
+                        self.advance()
+                    self._consume_newline()
+                    schema_fields = self._parse_field_defs()
+                elif tok.type in (TokenType.IDENTIFIER, TokenType.KEYWORD):
+                    key = self.advance().value
+                    val = self._read_rest_of_line().strip().strip('"')
+                    properties[key] = val
+                else:
+                    self._skip_to_newline()
+
+            if self.peek().type == TokenType.DEDENT:
+                self.advance()
+
+        return SinkDecl(
+            sink_type=sink_type,
+            properties=properties,
+            schema_fields=schema_fields,
+        )
+
+    def _parse_through(self) -> str:
+        """Parse: through <pathway_name>"""
+        if self.peek().type == TokenType.IDENTIFIER:
+            return self.advance().value
+        return self._read_rest_of_line().strip()
+
+    def _parse_bind_block(self) -> dict[str, str]:
+        """Parse bind block: key = value lines."""
+        bindings: dict[str, str] = {}
+        if self.peek().type == TokenType.INDENT:
+            self.advance()
+            while not self.at_end() and self.peek().type != TokenType.DEDENT:
+                self.skip_newlines()
+                if self.at_end() or self.peek().type == TokenType.DEDENT:
+                    break
+                if self.peek().type in (TokenType.IDENTIFIER, TokenType.KEYWORD):
+                    key = self.advance().value
+                    if self.peek().type == TokenType.EQUALS:
+                        self.advance()
+                        val = self._read_param_value()
+                        bindings[key] = val
+                    else:
+                        self._skip_to_newline()
+                else:
+                    self._skip_to_newline()
+            if self.peek().type == TokenType.DEDENT:
+                self.advance()
+        return bindings
 
     # --- Section parsers ---
 
@@ -943,7 +1132,7 @@ class Parser:
             self.advance()
 
 
-def parse_sg(source: str) -> GeneContract | PathwayContract | TopologyContract:
+def parse_sg(source: str) -> GeneContract | PathwayContract | TopologyContract | PipelineContract:
     """Parse a .sg source string into a contract AST node."""
     tokens = tokenize(source)
     parser = Parser(tokens)

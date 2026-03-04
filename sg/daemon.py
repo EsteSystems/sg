@@ -60,6 +60,12 @@ class Daemon:
             return
         dash._project_root = self.orchestrator.project_root
         dash._metrics_collector = self.metrics_collector
+        dash._daemon_ref = {
+            "running": True, "tick_count": 0,
+            "kernel": getattr(self.orchestrator.kernel, '__class__', '').__name__,
+            "mutation_engine": getattr(self.orchestrator.mutation_engine, '__class__', '').__name__,
+            "daemon": self,
+        }
 
         def _serve():
             uvicorn.run(dash.app, host=host, port=port, log_level="warning")
@@ -92,12 +98,23 @@ class Daemon:
     def stop(self) -> None:
         """Signal the daemon to stop after the current tick."""
         self._running = False
+        self._update_dashboard_ref()
+
+    def _update_dashboard_ref(self) -> None:
+        try:
+            import sg.dashboard as dash
+            if dash._daemon_ref is not None:
+                dash._daemon_ref["running"] = self._running
+                dash._daemon_ref["tick_count"] = self._tick_count
+        except Exception:
+            pass
 
     def _tick(self) -> None:
         """Execute one daemon tick."""
         start = time.monotonic()
         self._tick_count += 1
         logger.debug("tick %d", self._tick_count)
+        self._update_dashboard_ref()
 
         try:
             # 1. Health checks at intervals

@@ -1,9 +1,10 @@
 """Tokenization for the .sg contract format.
 
 Tokens:
-  KEYWORD     — gene, pathway, topology, is, risk, does, takes, gives, types,
-                before, after, fails when, unhealthy when, verify, within,
-                feeds, steps, requires, on failure, has, for, in, step, needs
+  KEYWORD     — gene, pathway, topology, pipeline, is, risk, does, takes, gives,
+                types, before, after, fails when, unhealthy when, verify, within,
+                feeds, steps, requires, on failure, has, for, in, step, needs,
+                source, sink, through, bind, schedule, schema
   IDENTIFIER  — bridge_create, configuration, string, etc.
   STRING      — "quoted description"
   REFERENCE   — {bridge_name}, {interfaces}
@@ -55,12 +56,13 @@ class Token:
 
 # Keywords that are single words
 _SINGLE_KEYWORDS = {
-    "gene", "pathway", "topology",
+    "gene", "pathway", "topology", "pipeline",
     "is", "risk",
     "does", "takes", "gives", "types",
     "before", "after", "verify", "within", "feeds",
     "steps", "requires", "has",
     "for", "in", "step", "needs", "when",
+    "source", "sink", "through", "bind", "schedule", "schema",
 }
 
 # Two-word keywords (first word -> second word)

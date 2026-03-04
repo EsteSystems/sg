@@ -1251,6 +1251,137 @@ def cmd_loci(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_pipeline(args: argparse.Namespace) -> None:
+    """Manage and run data pipelines."""
+    from sg.pipeline import build_pipeline_input, run_pipeline
+
+    root = get_project_root()
+    contract_store = load_contract_store(root)
+    sub = getattr(args, "pipeline_command", None)
+
+    if sub == "list":
+        pipelines = contract_store.known_pipelines()
+        if not pipelines:
+            print("No pipelines defined. Create .sg files with 'pipeline' declarations.")
+            return
+        print("Pipelines:\n")
+        for name in pipelines:
+            p = contract_store.get_pipeline(name)
+            if p:
+                src = p.source.source_type.value if p.source else "none"
+                snk = p.sink.sink_type.value if p.sink else "none"
+                print(f"  {name}")
+                print(f"    {src} -> {p.through} -> {snk}")
+                if p.does:
+                    print(f"    {p.does[:80]}")
+            print()
+
+    elif sub == "show":
+        name = args.name
+        p = contract_store.get_pipeline(name)
+        if p is None:
+            print(f"Pipeline '{name}' not found.")
+            return
+
+        print(f"Pipeline: {p.name}")
+        if p.domain:
+            print(f"  Domain: {p.domain}")
+        if p.does:
+            print(f"  Does: {p.does}")
+        if p.source:
+            print(f"  Source: {p.source.source_type.value}")
+            for k, v in p.source.properties.items():
+                print(f"    {k}: {v}")
+            if p.source.schema_fields:
+                print(f"    Schema:")
+                for f in p.source.schema_fields:
+                    print(f"      {f.name}: {f.type}")
+        if p.sink:
+            print(f"  Sink: {p.sink.sink_type.value}")
+            for k, v in p.sink.properties.items():
+                print(f"    {k}: {v}")
+        print(f"  Through: {p.through}")
+        if p.bind:
+            print(f"  Bind:")
+            for k, v in p.bind.items():
+                print(f"    {k} = {v}")
+        if p.schedule:
+            print(f"  Schedule: {p.schedule}")
+
+        input_dict = build_pipeline_input(p)
+        print(f"\n  Constructed input:")
+        print(f"    {json.dumps(input_dict, indent=4)}")
+
+    elif sub == "run":
+        name = args.name
+        p = contract_store.get_pipeline(name)
+        if p is None:
+            print(f"Pipeline '{name}' not found.")
+            sys.exit(1)
+
+        orch = make_orchestrator(args)
+        input_override = None
+        if getattr(args, "override", None):
+            try:
+                input_override = json.loads(args.override)
+            except json.JSONDecodeError as e:
+                print(f"error: invalid --override JSON: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        input_dict = build_pipeline_input(p)
+        if input_override:
+            input_dict.update(input_override)
+
+        print(f"Running pipeline '{name}': {p.source.source_type.value if p.source else '?'} -> {p.through} -> {p.sink.sink_type.value if p.sink else '?'}")
+        print(f"  Input: {json.dumps(input_dict)}")
+        print()
+
+        result = run_pipeline(p, orch, input_override)
+
+        try:
+            orch.verify_scheduler.wait()
+            orch.save_state()
+        except Exception:
+            pass
+
+        if result.success:
+            print(f"Pipeline '{name}' completed successfully.")
+        else:
+            print(f"Pipeline '{name}' failed.")
+            if result.error:
+                print(f"  Error: {result.error}")
+
+        for i, output in enumerate(result.outputs):
+            if len(result.outputs) > 1:
+                print(f"--- Step {i + 1} ---")
+            try:
+                parsed = json.loads(output)
+                print(json.dumps(parsed, indent=2))
+            except json.JSONDecodeError:
+                print(output)
+
+    elif sub == "discover":
+        name = args.name
+        p = contract_store.get_pipeline(name)
+        if p is None:
+            print(f"Pipeline '{name}' not found.")
+            sys.exit(1)
+
+        kernel = make_kernel(args)
+        from sg.pipeline import discover_source_schema
+        fields = discover_source_schema(p, kernel)
+        if not fields:
+            print("Could not discover source schema.")
+            return
+        print(f"Discovered schema for '{name}' source:\n")
+        for f in fields:
+            sample = f" (sample: {f['sample']})" if f.get("sample") else ""
+            print(f"  {f['name']}: {f['type']}{sample}")
+
+    else:
+        print("Usage: sg pipeline {list|show|run|discover}")
+
+
 def cmd_daemon(args: argparse.Namespace) -> None:
     """Run the daemon loop."""
     from sg.daemon import Daemon, DaemonConfig
@@ -1550,6 +1681,17 @@ def main() -> None:
 
     subparsers.add_parser("loci", help="show cross-locus failure proposals", parents=[_shared_args])
 
+    pipe_parser = subparsers.add_parser("pipeline", help="manage and run data pipelines", parents=[_shared_args])
+    pipe_sub = pipe_parser.add_subparsers(dest="pipeline_command")
+    pipe_sub.add_parser("list", help="list all defined pipelines")
+    pipe_show = pipe_sub.add_parser("show", help="show pipeline details and constructed input")
+    pipe_show.add_argument("name", help="pipeline name")
+    pipe_run = pipe_sub.add_parser("run", help="run a pipeline")
+    pipe_run.add_argument("name", help="pipeline name")
+    pipe_run.add_argument("--override", help="JSON dict to merge over auto-constructed input")
+    pipe_discover = pipe_sub.add_parser("discover", help="discover source schema")
+    pipe_discover.add_argument("name", help="pipeline name")
+
     daemon_parser = subparsers.add_parser("daemon", help="run continuous evolutionary loop", parents=[_shared_args])
     daemon_parser.add_argument("--tick-interval", type=float, default=60.0,
                                help="seconds between ticks (default: 60)")
@@ -1642,6 +1784,8 @@ def main() -> None:
         cmd_pool(args)
     elif args.command == "loci":
         cmd_loci(args)
+    elif args.command == "pipeline":
+        cmd_pipeline(args)
     elif args.command == "daemon":
         cmd_daemon(args)
     elif args.command == "contracts":

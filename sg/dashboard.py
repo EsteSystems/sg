@@ -343,6 +343,300 @@ def api_contract_evolution(locus: str | None = None):
     return {"proposals": [p.to_dict() for p in proposals]}
 
 
+# ── Action endpoints (control plane) ──────────────────────────────────
+
+import asyncio
+import uuid as _uuid
+from collections import OrderedDict
+
+_jobs: OrderedDict[str, dict] = OrderedDict()
+_MAX_JOBS = 50
+
+
+def _prune_jobs() -> None:
+    while len(_jobs) > _MAX_JOBS:
+        _jobs.popitem(last=False)
+
+
+@app.get("/api/job/{job_id}")
+def api_job(job_id: str):
+    """Poll for job result."""
+    job = _jobs.get(job_id)
+    if job is None:
+        return JSONResponse({"error": "job not found"}, status_code=404)
+    return job
+
+
+@app.get("/api/kernels")
+def api_kernels():
+    """List available kernel names."""
+    from sg.kernel.discovery import discover_kernels
+    result = []
+    for name, ep in sorted(discover_kernels().items()):
+        result.append({"name": name, "entry_point": ep.value})
+    return {"kernels": result}
+
+
+@app.post("/api/run")
+async def api_run(request: Request):
+    """Run a pathway in background, return job ID for polling."""
+    data = await request.json()
+    pathway_name = data.get("pathway")
+    input_json = json.dumps(data.get("input", {}))
+    kernel_name = data.get("kernel", "data-mock")
+
+    if not pathway_name:
+        return JSONResponse({"error": "pathway is required"}, status_code=400)
+
+    job_id = _uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "type": "run", "pathway": pathway_name}
+    _prune_jobs()
+
+    def _do_run():
+        root = _project_root
+        try:
+            from sg.kernel.discovery import load_kernel
+            from sg.cli import load_contract_store
+            from sg.orchestrator import Orchestrator
+            from sg.mutation import MockMutationEngine
+            from sg.meta_params import MetaParamTracker
+
+            contract_store = load_contract_store(root)
+            registry = Registry.open(root / ".sg" / "registry")
+            phenotype = PhenotypeMap.load(root / "phenotype.toml")
+            fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
+            kernel = load_kernel(kernel_name)
+            pft = PathwayFitnessTracker.open(root / "pathway_fitness.json")
+            pr = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+            meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
+            mutation_engine = MockMutationEngine(root / "fixtures")
+
+            orch = Orchestrator(
+                registry=registry, phenotype=phenotype,
+                mutation_engine=mutation_engine, fusion_tracker=fusion_tracker,
+                kernel=kernel, contract_store=contract_store,
+                project_root=root,
+                pathway_fitness_tracker=pft, pathway_registry=pr,
+                meta_param_tracker=meta_tracker,
+            )
+
+            outputs = orch.run_pathway(pathway_name, input_json)
+            orch.verify_scheduler.wait()
+            orch.save_state()
+
+            steps = []
+            for i, (out, sha) in enumerate(outputs):
+                try:
+                    parsed = json.loads(out)
+                except Exception:
+                    parsed = out
+                steps.append({"step": i + 1, "sha": sha[:12], "output": parsed})
+
+            _jobs[job_id] = {"status": "done", "type": "run", "success": True,
+                             "pathway": pathway_name, "steps": steps}
+        except Exception as e:
+            _jobs[job_id] = {"status": "done", "type": "run", "success": False,
+                             "error": str(e)}
+
+    asyncio.get_event_loop().run_in_executor(None, _do_run)
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/api/generate")
+async def api_generate(request: Request):
+    """Generate competing alleles via LLM in background."""
+    data = await request.json()
+    locus = data.get("locus")
+    count = data.get("count", 1)
+    kernel_name = data.get("kernel", "data-mock")
+    engine_name = data.get("mutation_engine", "mock")
+
+    if not locus:
+        return JSONResponse({"error": "locus is required"}, status_code=400)
+
+    job_id = _uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "type": "generate", "locus": locus}
+    _prune_jobs()
+
+    def _do_generate():
+        root = _project_root
+        try:
+            from sg.kernel.discovery import load_kernel
+            from sg.cli import load_contract_store, make_mutation_engine
+            import argparse
+
+            contract_store = load_contract_store(root)
+            registry = Registry.open(root / ".sg" / "registry")
+            phenotype = PhenotypeMap.load(root / "phenotype.toml")
+            kernel = load_kernel(kernel_name)
+
+            args = argparse.Namespace(
+                mutation_engine=engine_name,
+                model=data.get("model"),
+                kernel=kernel_name,
+            )
+            mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
+
+            gene = contract_store.get_gene(locus)
+            if gene is None:
+                _jobs[job_id] = {"status": "done", "type": "generate", "success": False,
+                                 "error": f"unknown locus: {locus}"}
+                return
+
+            if hasattr(mutation_engine, '_contract_prompt'):
+                contract_prompt = mutation_engine._contract_prompt(locus)
+            else:
+                contract_prompt = f"Locus: {locus}\nDescription: {gene.does}"
+
+            dominant_sha = phenotype.get_dominant(locus)
+            parent_gen = 0
+            if dominant_sha:
+                parent = registry.get(dominant_sha)
+                if parent:
+                    parent_gen = parent.generation
+
+            sources = mutation_engine.generate(locus, contract_prompt, count=count)
+
+            registered = []
+            for src in sources:
+                sha = registry.register(src, locus, generation=parent_gen + 1,
+                                        parent_sha=dominant_sha)
+                allele = registry.get(sha)
+                if allele:
+                    allele.state = "recessive"
+                phenotype.add_to_fallback(locus, sha)
+                registered.append(sha[:12])
+
+            registry.save_index()
+            phenotype.save(root / "phenotype.toml")
+            _jobs[job_id] = {"status": "done", "type": "generate", "success": True,
+                             "locus": locus, "registered": registered}
+        except Exception as e:
+            _jobs[job_id] = {"status": "done", "type": "generate", "success": False,
+                             "error": str(e)}
+
+    asyncio.get_event_loop().run_in_executor(None, _do_generate)
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.post("/api/compete")
+async def api_compete(request: Request):
+    """Run allele competition trials in background."""
+    data = await request.json()
+    locus = data.get("locus")
+    input_json = json.dumps(data.get("input", {}))
+    rounds = data.get("rounds", 10)
+    kernel_name = data.get("kernel", "data-mock")
+
+    if not locus:
+        return JSONResponse({"error": "locus is required"}, status_code=400)
+
+    job_id = _uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "type": "compete", "locus": locus}
+    _prune_jobs()
+
+    def _do_compete():
+        root = _project_root
+        try:
+            from sg.kernel.discovery import load_kernel
+            from sg.cli import load_contract_store
+            from sg.loader import load_gene, call_gene
+            from sg.contracts import validate_output
+            from sg.meta_params import MetaParamTracker
+
+            contract_store = load_contract_store(root)
+            registry = Registry.open(root / ".sg" / "registry")
+            phenotype = PhenotypeMap.load(root / "phenotype.toml")
+            kernel = load_kernel(kernel_name)
+            mpt = MetaParamTracker.open(root / ".sg" / "meta_params.json")
+
+            alleles = registry.alleles_for_locus(locus)
+            if not alleles:
+                _jobs[job_id] = {"status": "done", "type": "compete", "success": False,
+                                 "error": f"no alleles for locus: {locus}"}
+                return
+
+            results = []
+            for allele in alleles:
+                source = registry.load_source(allele.sha256)
+                if source is None:
+                    continue
+                passed = 0
+                last_error = None
+                last_output = None
+                for _ in range(rounds):
+                    try:
+                        fn = load_gene(source, kernel)
+                        result = call_gene(fn, input_json)
+                        last_output = result[:200] if result else None
+                        if validate_output(locus, result, contract_store):
+                            passed += 1
+                            arena.record_success(allele)
+                        else:
+                            arena.record_failure(allele)
+                            last_error = f"validation failed: {result[:120]}" if result else "empty output"
+                    except Exception as exc:
+                        arena.record_failure(allele)
+                        last_error = str(exc)[:150]
+
+                results.append({
+                    "sha": allele.sha256[:12],
+                    "state": allele.state,
+                    "passed": passed,
+                    "total": rounds,
+                    "fitness": round(arena.compute_fitness(allele, params=mpt.get_params(locus)), 3),
+                    "last_error": last_error,
+                    "last_output": last_output,
+                })
+
+            # Promote the best performer if it beats the current dominant
+            results.sort(key=lambda r: r["fitness"], reverse=True)
+            best = results[0] if results else None
+            dominant_sha = phenotype.get_dominant(locus)
+            promoted = None
+            if best and dominant_sha:
+                dom_result = next((r for r in results if r["sha"] == dominant_sha[:12]), None)
+                if dom_result and best["sha"] != dom_result["sha"] and best["fitness"] > dom_result["fitness"] + 0.05:
+                    best_full = next((a.sha256 for a in alleles if a.sha256.startswith(best["sha"])), None)
+                    if best_full:
+                        phenotype.promote(locus, best_full)
+                        winner = registry.get(best_full)
+                        if winner:
+                            winner.state = "dominant"
+                        loser = registry.get(dominant_sha)
+                        if loser:
+                            loser.state = "recessive"
+                        promoted = best["sha"]
+                        phenotype.save(root / "phenotype.toml")
+
+            registry.save_index()
+            _jobs[job_id] = {
+                "status": "done", "type": "compete", "success": True,
+                "locus": locus, "rounds": rounds, "results": results,
+                "dominant": dominant_sha[:12] if dominant_sha else None,
+                "promoted": promoted,
+            }
+        except Exception as e:
+            _jobs[job_id] = {"status": "done", "type": "compete", "success": False,
+                             "error": str(e)}
+
+    asyncio.get_event_loop().run_in_executor(None, _do_compete)
+    return {"job_id": job_id, "status": "running"}
+
+
+@app.get("/api/daemon/status")
+def api_daemon_status():
+    """Return daemon state."""
+    return {
+        "running": _daemon_ref is not None and _daemon_ref.get("running", False),
+        "tick_count": _daemon_ref.get("tick_count", 0) if _daemon_ref else 0,
+        "kernel": _daemon_ref.get("kernel", "") if _daemon_ref else "",
+        "mutation_engine": _daemon_ref.get("mutation_engine", "") if _daemon_ref else "",
+    }
+
+_daemon_ref: dict | None = None
+
+
 # Federation endpoints (used by sg share/pull)
 
 @app.post("/api/federation/receive")
@@ -422,8 +716,52 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
 * { box-sizing:border-box; margin:0; padding:0; }
 body { font-family:'JetBrains Mono','Fira Code',monospace; background:var(--bg-deep);
   color:var(--text); display:grid; grid-template-columns:220px 1fr 0px;
-  grid-template-rows:1fr; height:100vh; overflow:hidden; font-size:12px; }
+  grid-template-rows:auto 1fr; height:100vh; overflow:hidden; font-size:12px; }
 body.detail-open { grid-template-columns:220px 1fr 300px; }
+
+/* Command Bar */
+#command-bar { grid-column:1/-1; background:var(--bg-panel); border-bottom:1px solid var(--border);
+  padding:8px 16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; z-index:10; }
+#command-bar select, #command-bar input, #command-bar button {
+  font-family:inherit; font-size:11px; border-radius:3px; }
+#command-bar select, #command-bar input {
+  background:var(--bg-card); border:1px solid var(--border); color:var(--text);
+  padding:5px 8px; }
+#command-bar select { min-width:140px; }
+#command-bar input.json-input { flex:1; min-width:200px; max-width:400px; }
+#command-bar .sep { width:1px; height:24px; background:var(--border); }
+#command-bar button {
+  padding:5px 14px; cursor:pointer; border:1px solid var(--border);
+  font-weight:bold; transition:all 0.15s; }
+#command-bar .btn-run { background:#0f03; color:var(--success); border-color:var(--success); }
+#command-bar .btn-run:hover { background:#0f06; }
+#command-bar .btn-gen { background:#0ff1; color:var(--accent); border-color:var(--accent); }
+#command-bar .btn-gen:hover { background:#0ff3; }
+#command-bar .btn-compete { background:#f801; color:var(--warning); border-color:var(--warning); }
+#command-bar .btn-compete:hover { background:#f803; }
+#command-bar .daemon-status { margin-left:auto; font-size:10px; color:var(--text-dim);
+  display:flex; align-items:center; gap:6px; }
+#command-bar .daemon-dot { width:8px; height:8px; border-radius:50%; }
+#command-bar .daemon-dot.on { background:var(--success); box-shadow:0 0 6px var(--success); }
+#command-bar .daemon-dot.off { background:var(--danger); }
+#command-bar label { color:var(--text-dim); font-size:10px; text-transform:uppercase; }
+.cmd-group { display:flex; align-items:center; gap:6px; }
+.cmd-count { width:40px; text-align:center; }
+
+/* Output Toast */
+#output-toast { position:fixed; bottom:16px; right:16px; max-width:520px; max-height:60vh;
+  background:var(--bg-panel); border:1px solid var(--accent); border-radius:6px;
+  padding:12px; z-index:200; display:none; overflow:auto; font-size:11px;
+  box-shadow:0 4px 20px rgba(0,0,0,0.5); }
+#output-toast.show { display:block; }
+#output-toast .toast-header { display:flex; justify-content:space-between; align-items:center;
+  margin-bottom:8px; }
+#output-toast .toast-header h4 { color:var(--accent); font-size:12px; }
+#output-toast .toast-close { background:none; border:none; color:var(--danger); cursor:pointer;
+  font-size:16px; font-family:inherit; }
+#output-toast pre { white-space:pre-wrap; color:var(--text); line-height:1.5; }
+#output-toast .toast-success { color:var(--success); }
+#output-toast .toast-error { color:var(--danger); }
 
 /* Sidebar */
 #sidebar { background:var(--bg-panel); border-right:1px solid var(--border);
@@ -510,6 +848,12 @@ marker { fill:var(--text-dim); }
 .allele-card .sha { font-size:11px; color:var(--accent2); cursor:pointer; }
 .allele-card .meta { font-size:10px; color:var(--text-dim); margin-top:4px; }
 .allele-connector { width:2px; height:12px; background:var(--border); margin-left:20px; }
+.btn-compete { background:var(--recessive); color:#fff; border:none; border-radius:3px; cursor:pointer;
+  font-size:11px; padding:4px 12px; }
+.btn-compete:hover { background:#c59000; }
+.btn-gen { background:var(--accent2); color:#fff; border:none; border-radius:3px; cursor:pointer;
+  font-size:11px; padding:4px 12px; }
+.btn-gen:hover { filter:brightness(1.2); }
 
 /* Kanban */
 .kanban { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
@@ -582,6 +926,55 @@ body.detail-open #detail { display:block; }
 .heatmap svg text { fill:var(--text); font-size:10px; font-family:inherit; }
 </style>
 </head><body>
+
+<!-- Command Bar -->
+<div id="command-bar">
+  <div class="cmd-group">
+    <label>Pathway</label>
+    <select id="cmd-pathway"></select>
+  </div>
+  <div class="cmd-group">
+    <label>Kernel</label>
+    <select id="cmd-kernel"></select>
+  </div>
+  <div class="cmd-group">
+    <label>Input</label>
+    <input id="cmd-input" class="json-input" type="text" placeholder='{"key": "value"}' value="{}">
+  </div>
+  <button class="btn-run" onclick="cmdRun()" title="Run pathway">Run</button>
+  <div class="sep"></div>
+  <div class="cmd-group">
+    <label>Locus</label>
+    <select id="cmd-locus"></select>
+  </div>
+  <div class="cmd-group">
+    <label>Engine</label>
+    <select id="cmd-engine">
+      <option value="mock">mock</option>
+      <option value="deepseek">deepseek</option>
+      <option value="claude">claude</option>
+      <option value="openai">openai</option>
+    </select>
+  </div>
+  <div class="cmd-group">
+    <input id="cmd-count" class="cmd-count" type="number" value="1" min="1" max="10">
+  </div>
+  <button class="btn-gen" onclick="cmdGenerate()" title="Generate competing alleles">Generate</button>
+  <button class="btn-compete" onclick="cmdCompete()" title="Run competition trials">Compete</button>
+  <div class="daemon-status">
+    <span class="daemon-dot off" id="daemon-dot"></span>
+    <span id="daemon-label">daemon stopped</span>
+  </div>
+</div>
+
+<!-- Output Toast -->
+<div id="output-toast">
+  <div class="toast-header">
+    <h4 id="toast-title">Output</h4>
+    <button class="toast-close" onclick="closeToast()">&times;</button>
+  </div>
+  <pre id="toast-body"></pre>
+</div>
 
 <!-- Sidebar -->
 <div id="sidebar">
@@ -917,25 +1310,55 @@ async function renderPathwayFlow() {
   svg.attr('height', maxY);
 }
 
+// Cached feeds graph state — survives re-renders
+let _feedsSim = null;
+let _feedsKey = '';
+
 function renderFeedsNetwork() {
   const el = document.getElementById('logical-feeds');
   const {feeds, verify_links} = state.feeds;
   if(!feeds.length && !verify_links.length) {
     el.innerHTML = '<div class="empty-state">No feeds or verify relationships defined</div>';
+    _feedsSim = null; _feedsKey = '';
     return;
   }
 
-  // Collect unique nodes
+  // Only rebuild if the graph structure changed
+  const key = JSON.stringify([feeds.map(f=>f.source+'>'+f.target).sort(),
+    verify_links.map(v=>v.source+'>'+v.target).sort()]);
+  if(key === _feedsKey && _feedsSim && document.getElementById('feeds-svg')) {
+    // Just update fitness colors in place
+    const lociMap = {}; state.loci.forEach(l => lociMap[l.name] = l);
+    d3.select('#feeds-svg').selectAll('.node').each(function(d) {
+      const l = lociMap[d.id];
+      if(l) d.fitness = l.dominant_fitness;
+      const g = d3.select(this);
+      const fill = fitnessColor(d.fitness)+'33';
+      const stroke = fitnessColor(d.fitness);
+      g.select('circle').attr('fill',fill).attr('stroke',stroke);
+      g.select('rect').attr('fill',fill).attr('stroke',stroke);
+    });
+    return;
+  }
+  _feedsKey = key;
+
   const nodeSet = new Set();
   feeds.forEach(e => { nodeSet.add(e.source); nodeSet.add(e.target); });
   verify_links.forEach(e => { nodeSet.add(e.source); nodeSet.add(e.target); });
   const lociMap = {};
   state.loci.forEach(l => lociMap[l.name] = l);
 
-  const nodes = [...nodeSet].map(name => {
+  const nodeArr = [...nodeSet];
+  const width = el.clientWidth - 32 || 600, height = 450;
+  const cx = width/2, cy = height/2, radius = Math.min(width, height) * 0.35;
+
+  // Circular initial layout to avoid overlap
+  const nodes = nodeArr.map((name, i) => {
+    const angle = (2 * Math.PI * i) / nodeArr.length - Math.PI/2;
     const l = lociMap[name];
     const isDiag = feeds.some(f => f.source===name && f.source_family==='diagnostic');
-    return {id:name, fitness: l?.dominant_fitness||0, isDiag};
+    return {id:name, fitness: l?.dominant_fitness||0, isDiag,
+            x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle)};
   });
   const links = [
     ...feeds.map(f => ({source:f.source, target:f.target, type:'feeds', timescale:f.timescale})),
@@ -944,9 +1367,7 @@ function renderFeedsNetwork() {
 
   el.innerHTML = `<div class="view-title">Feeds & Verify Network</div><svg id="feeds-svg" width="100%" height="450"></svg>`;
   const svg = d3.select('#feeds-svg');
-  const width = el.clientWidth - 32, height = 450;
 
-  // Arrow markers
   const defs = svg.append('defs');
   ['feeds','verify'].forEach(t => {
     defs.append('marker').attr('id',`arr-${t}`).attr('viewBox','0 0 10 10')
@@ -955,11 +1376,15 @@ function renderFeedsNetwork() {
       .attr('fill', t==='feeds'?'var(--convergence)':'var(--text-dim)');
   });
 
-  const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d=>d.id).distance(120))
-    .force('charge', d3.forceManyBody().strength(-300))
-    .force('center', d3.forceCenter(width/2, height/2))
-    .force('collide', d3.forceCollide(40));
+  if(_feedsSim) _feedsSim.stop();
+  _feedsSim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d=>d.id).distance(160).strength(0.6))
+    .force('charge', d3.forceManyBody().strength(-500))
+    .force('center', d3.forceCenter(cx, cy))
+    .force('collide', d3.forceCollide(55))
+    .force('x', d3.forceX(cx).strength(0.05))
+    .force('y', d3.forceY(cy).strength(0.05))
+    .alphaDecay(0.03);
 
   const link = svg.selectAll('.edge').data(links).join('line')
     .attr('class', d => `edge ${d.type}`)
@@ -975,8 +1400,11 @@ function renderFeedsNetwork() {
   const node = svg.selectAll('.node').data(nodes).join('g')
     .attr('class','node').style('cursor','pointer')
     .on('click', (e,d) => selectEntity('locus', d.id))
-    .call(d3.drag().on('start',(e,d)=>{if(!e.active)sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y;})
-      .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y;}).on('end',(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}));
+    .call(d3.drag()
+      .on('start',(e,d)=>{if(!e.active)_feedsSim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y;})
+      .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y;})
+      .on('end',(e,d)=>{if(!e.active)_feedsSim.alphaTarget(0);})
+    );
 
   node.each(function(d) {
     const g = d3.select(this);
@@ -992,7 +1420,7 @@ function renderFeedsNetwork() {
       .attr('fill','var(--text)').text(d.id.length>20?d.id.slice(0,18)+'..':d.id);
   });
 
-  sim.on('tick', () => {
+  _feedsSim.on('tick', () => {
     link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
       .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
     node.attr('transform',d=>`translate(${d.x},${d.y})`);
@@ -1101,7 +1529,14 @@ async function renderAlleleStack() {
   if(!data) { el.innerHTML = '<div class="empty-state">Loading...</div>'; return; }
 
   const alleles = data.alleles || [];
-  el.innerHTML = `<div class="view-title">Allele Stack: ${sel.name}</div>
+  const hasCompetitors = alleles.length > 1;
+  el.innerHTML = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+      <div class="view-title" style="margin:0">Allele Stack: ${sel.name}</div>
+      ${hasCompetitors ? `<button class="btn-compete" style="font-size:11px;padding:4px 12px"
+        onclick="competeLocus('${sel.name}')">Compete (${alleles.length} alleles)</button>` : ''}
+      <button class="btn-gen" style="font-size:11px;padding:4px 12px"
+        onclick="generateForLocus('${sel.name}')">+ Generate</button>
+    </div>
     <div class="allele-stack">
     ${alleles.map((a,i) => `
       ${i>0?'<div class="allele-connector"></div>':''}
@@ -1471,13 +1906,23 @@ async function showSource(sha) {
   const d = await fetchJSON('/api/allele/'+sha+'/source');
   document.getElementById('source-title').textContent = 'Source: ' + sha;
   const src = d?.source || d?.error || 'not found';
-  // Basic Python highlighting
-  document.getElementById('source-code').innerHTML = src
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/(#.*$)/gm,'<span class="cm">$1</span>')
-    .replace(/\b(def|class|return|import|from|if|else|elif|try|except|for|in|while|with|as|raise|not|and|or|is|None|True|False|break|continue|pass|lambda|yield|async|await)\b/g,'<span class="kw">$1</span>')
-    .replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g,'<span class="str">$1</span>')
-    .replace(/\b(\d+\.?\d*)\b/g,'<span class="num">$1</span>');
+  // Python highlighting — tokenize to avoid corrupting HTML tags
+  const escaped = src.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const tokens = [];
+  const kws = 'def|class|return|import|from|if|else|elif|try|except|for|in|while|with|as|raise|not|and|or|is|None|True|False|break|continue|pass|lambda|yield|async|await';
+  const strPat = '"(?:[^"\\\\]|\\\\.)*"|' + "'(?:[^'\\\\]|\\\\.)*'";
+  const re = new RegExp('(' + strPat + ')|(#.*$)|(\\b(?:' + kws + ')\\b)|(\\b\\d+\\.?\\d*\\b)', 'gm');
+  let last = 0, m;
+  while((m = re.exec(escaped)) !== null) {
+    if(m.index > last) tokens.push(escaped.slice(last, m.index));
+    if(m[1]) tokens.push('<span class="str">'+m[1]+'</span>');
+    else if(m[2]) tokens.push('<span class="cm">'+m[2]+'</span>');
+    else if(m[3]) tokens.push('<span class="kw">'+m[3]+'</span>');
+    else if(m[4]) tokens.push('<span class="num">'+m[4]+'</span>');
+    last = re.lastIndex;
+  }
+  if(last < escaped.length) tokens.push(escaped.slice(last));
+  document.getElementById('source-code').innerHTML = tokens.join('');
   document.getElementById('source-modal').classList.add('open');
 }
 
@@ -1512,11 +1957,204 @@ function loadHash() {
   }
 }
 
+// ══════════════════════════════════════════
+// COMMAND BAR
+// ══════════════════════════════════════════
+
+async function initCommandBar() {
+  // Populate kernels
+  const kernelData = await fetchJSON('/api/kernels');
+  const kernelSel = document.getElementById('cmd-kernel');
+  kernelSel.innerHTML = '';
+  if(kernelData?.kernels) {
+    kernelData.kernels.forEach(k => {
+      const opt = document.createElement('option');
+      opt.value = k.name; opt.textContent = k.name;
+      if(k.name === 'data-production') opt.selected = true;
+      kernelSel.appendChild(opt);
+    });
+  }
+}
+
+function updateCommandBarSelectors() {
+  // Populate pathways
+  const pwSel = document.getElementById('cmd-pathway');
+  const curPw = pwSel.value;
+  pwSel.innerHTML = '';
+  state.pathways.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.name; opt.textContent = p.name;
+    if(p.name === curPw) opt.selected = true;
+    pwSel.appendChild(opt);
+  });
+
+  // Populate loci
+  const locusSel = document.getElementById('cmd-locus');
+  const curLocus = locusSel.value;
+  locusSel.innerHTML = '';
+  state.loci.forEach(l => {
+    const opt = document.createElement('option');
+    opt.value = l.name; opt.textContent = l.name;
+    if(l.name === curLocus) opt.selected = true;
+    locusSel.appendChild(opt);
+  });
+}
+
+function showToast(title, body, isError) {
+  document.getElementById('toast-title').textContent = title;
+  const el = document.getElementById('toast-body');
+  el.className = isError ? 'toast-error' : 'toast-success';
+  el.style.whiteSpace = 'pre-wrap';
+  el.textContent = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+  document.getElementById('output-toast').classList.add('show');
+}
+function closeToast() { document.getElementById('output-toast').classList.remove('show'); }
+
+async function pollJob(jobId, title) {
+  const poll = async () => {
+    const data = await fetchJSON('/api/job/' + jobId);
+    if(!data) { showToast(title + ' Error', 'Lost connection', true); return; }
+    if(data.status === 'running') {
+      setTimeout(poll, 500);
+      return;
+    }
+    if(data.success) {
+      let msg = data;
+      if(data.type === 'compete' && data.results) {
+        const lines = data.results.map(r => {
+          let line = r.sha + ' [' + r.state + '] ' + r.passed + '/' + r.total + ' fitness=' + r.fitness;
+          if(r.passed === 0 && r.last_error) line += '\\n  error: ' + r.last_error;
+          return line;
+        });
+        if(data.promoted) lines.push('PROMOTED: ' + data.promoted + ' is the new dominant');
+        msg = lines.join('\\n');
+      }
+      showToast(title, msg, false);
+    }
+    else { showToast(title + ' Failed', data.error || data, true); }
+    refreshData();
+  };
+  poll();
+}
+
+async function cmdRun() {
+  const pathway = document.getElementById('cmd-pathway').value;
+  const kernel = document.getElementById('cmd-kernel').value;
+  let input;
+  try { input = JSON.parse(document.getElementById('cmd-input').value || '{}'); }
+  catch(e) { showToast('Input Error', 'Invalid JSON: ' + e.message, true); return; }
+
+  showToast('Running...', pathway + ' with ' + kernel, false);
+  try {
+    const resp = await fetch('/api/run', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({pathway, kernel, input}),
+    });
+    const data = await resp.json();
+    if(data.error) { showToast('Run Failed', data.error, true); }
+    else { pollJob(data.job_id, 'Run: ' + pathway); }
+  } catch(e) { showToast('Run Error', e.message, true); }
+}
+
+async function cmdGenerate() {
+  const locus = document.getElementById('cmd-locus').value;
+  const kernel = document.getElementById('cmd-kernel').value;
+  const engine = document.getElementById('cmd-engine').value;
+  const count = parseInt(document.getElementById('cmd-count').value) || 1;
+
+  showToast('Generating...', count + ' variant(s) for ' + locus + ' via ' + engine, false);
+  try {
+    const resp = await fetch('/api/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({locus, kernel, mutation_engine: engine, count}),
+    });
+    const data = await resp.json();
+    if(data.error) { showToast('Generate Failed', data.error, true); }
+    else { pollJob(data.job_id, 'Generated: ' + locus); }
+  } catch(e) { showToast('Generate Error', e.message, true); }
+}
+
+async function cmdCompete() {
+  const locus = document.getElementById('cmd-locus').value;
+  const kernel = document.getElementById('cmd-kernel').value;
+  let input;
+  try { input = JSON.parse(document.getElementById('cmd-input').value || '{}'); }
+  catch(e) { showToast('Input Error', 'Invalid JSON: ' + e.message, true); return; }
+
+  const rounds = parseInt(document.getElementById('cmd-count').value) || 10;
+  showToast('Competing...', locus + ' (' + rounds + ' rounds)', false);
+  try {
+    const resp = await fetch('/api/compete', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({locus, kernel, input, rounds}),
+    });
+    const data = await resp.json();
+    if(data.error) { showToast('Compete Failed', data.error, true); }
+    else { pollJob(data.job_id, 'Competition: ' + locus); }
+  } catch(e) { showToast('Compete Error', e.message, true); }
+}
+
+async function competeLocus(locus) {
+  const kernel = document.getElementById('cmd-kernel').value || 'data-mock';
+  let input;
+  try { input = JSON.parse(document.getElementById('cmd-input').value || '{}'); }
+  catch(e) { input = {}; }
+
+  const rounds = 10;
+  showToast('Competing...', locus + ' (' + rounds + ' rounds, all alleles)', false);
+  try {
+    const resp = await fetch('/api/compete', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({locus, kernel, input, rounds}),
+    });
+    const data = await resp.json();
+    if(data.error) { showToast('Compete Failed', data.error, true); }
+    else { pollJob(data.job_id, 'Competition: ' + locus); }
+  } catch(e) { showToast('Compete Error', e.message, true); }
+}
+
+async function generateForLocus(locus) {
+  const kernel = document.getElementById('cmd-kernel').value || 'data-mock';
+  const engine = document.getElementById('cmd-engine').value || 'mock';
+  showToast('Generating...', '1 variant for ' + locus + ' via ' + engine, false);
+  try {
+    const resp = await fetch('/api/generate', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({locus, kernel, mutation_engine: engine, count: 1}),
+    });
+    const data = await resp.json();
+    if(data.error) { showToast('Generate Failed', data.error, true); }
+    else { pollJob(data.job_id, 'Generated: ' + locus); }
+  } catch(e) { showToast('Generate Error', e.message, true); }
+}
+
+async function updateDaemonStatus() {
+  const data = await fetchJSON('/api/daemon/status');
+  if(!data) return;
+  const dot = document.getElementById('daemon-dot');
+  const label = document.getElementById('daemon-label');
+  if(data.running) {
+    dot.className = 'daemon-dot on';
+    label.textContent = 'daemon tick #' + data.tick_count;
+  } else {
+    dot.className = 'daemon-dot off';
+    label.textContent = 'daemon stopped';
+  }
+}
+
+// Extend refreshData to also update command bar selectors and daemon status
+const _origRefreshData = refreshData;
+refreshData = async function() {
+  await _origRefreshData();
+  updateCommandBarSelectors();
+  updateDaemonStatus();
+};
+
 // ── Init ──
 loadHash();
+initCommandBar();
 refreshData();
 connectSSE();
-// Fallback polling in case SSE doesn't work
 setInterval(refreshData, 5000);
 </script>
 </body></html>"""

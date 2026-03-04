@@ -183,7 +183,14 @@ class Orchestrator:
                 result = call_gene(execute_fn, input_json)
 
                 if not validate_output(locus, result, self.contract_store):
-                    raise RuntimeError(f"output validation failed for {locus}")
+                    detail = ""
+                    try:
+                        _out = json.loads(result)
+                        if isinstance(_out, dict) and not _out.get("success"):
+                            detail = f": {_out.get('error', 'success=false')}"
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"output validation failed for {locus}{detail}")
 
                 if txn:
                     txn.commit()

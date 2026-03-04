@@ -79,7 +79,10 @@ def test_load_nonexistent_directory():
 
 def test_validate_output_valid():
     assert validate_output("bridge_create", json.dumps({"success": True}))
-    assert validate_output("bridge_create", json.dumps({"success": False, "error": "x"}))
+
+
+def test_validate_output_failure_is_invalid():
+    assert not validate_output("bridge_create", json.dumps({"success": False, "error": "x"}))
 
 
 def test_validate_output_missing_success():

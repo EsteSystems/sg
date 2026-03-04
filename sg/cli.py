@@ -1430,47 +1430,63 @@ def main() -> None:
                         help="emit structured JSON log lines")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init", help="initialize genome from seed genes")
+    # Shared flags that must work both before and after the subcommand.
+    # Using SUPPRESS so subparser values only override when explicitly given.
+    _shared_args = argparse.ArgumentParser(add_help=False)
+    _shared_args.add_argument("--kernel", default=argparse.SUPPRESS,
+                              help="kernel to use (see 'sg kernels' for available)")
+    _shared_args.add_argument("--mutation-engine", default=argparse.SUPPRESS,
+                              choices=MUTATION_ENGINE_CHOICES,
+                              help="mutation engine to use")
+    _shared_args.add_argument("--model", default=argparse.SUPPRESS,
+                              help="override default model for the mutation engine")
+    _shared_args.add_argument("--log-level", default=argparse.SUPPRESS,
+                              choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                              help="logging level")
+    _shared_args.add_argument("--log-json", action="store_true", default=argparse.SUPPRESS,
+                              help="emit structured JSON log lines")
+
+    init_parser = subparsers.add_parser("init", help="initialize genome from seed genes", parents=[_shared_args])
     init_parser.add_argument("--seed-from-pool", default=None,
                              help="after file seeding, pull alleles for unseeded loci from this pool")
 
-    run_parser = subparsers.add_parser("run", help="execute a pathway")
+    run_parser = subparsers.add_parser("run", help="execute a pathway", parents=[_shared_args])
     run_parser.add_argument("pathway", help="pathway name")
     run_parser.add_argument("--input", required=True, help="input JSON string")
     run_parser.add_argument("--force-mutate", action="store_true",
                             help="replace all dominant alleles with broken versions to force mutation")
 
-    gen_parser = subparsers.add_parser("generate", help="proactively generate competing alleles")
+    gen_parser = subparsers.add_parser("generate", help="proactively generate competing alleles", parents=[_shared_args])
     gen_parser.add_argument("locus", nargs="?", help="locus to generate for")
     gen_parser.add_argument("--all", action="store_true", help="generate for all loci with registered alleles")
     gen_parser.add_argument("--count", type=int, default=1, help="number of variants to generate (default: 1)")
 
-    watch_parser = subparsers.add_parser("watch", help="periodically run diagnostics for resilience fitness")
+    watch_parser = subparsers.add_parser("watch", help="periodically run diagnostics for resilience fitness", parents=[_shared_args])
     watch_parser.add_argument("pathway", help="diagnostic pathway to run")
     watch_parser.add_argument("--input", required=True, help="input JSON string")
     watch_parser.add_argument("--interval", type=float, default=300.0, help="seconds between runs (default: 300)")
     watch_parser.add_argument("--count", type=int, default=0, help="number of iterations (0 = infinite, default: 0)")
 
-    deploy_parser = subparsers.add_parser("deploy", help="deploy a topology")
+    deploy_parser = subparsers.add_parser("deploy", help="deploy a topology", parents=[_shared_args])
     deploy_parser.add_argument("topology", help="topology name")
     deploy_parser.add_argument("--input", required=True, help="input JSON string")
 
-    subparsers.add_parser("status", help="show genome status")
+    subparsers.add_parser("status", help="show genome status", parents=[_shared_args])
 
-    lineage_parser = subparsers.add_parser("lineage", help="show mutation ancestry for a locus or pathway")
+    lineage_parser = subparsers.add_parser("lineage", help="show mutation ancestry for a locus or pathway", parents=[_shared_args])
     lineage_parser.add_argument("locus", nargs="?", default=None, help="locus or pathway name")
     lineage_parser.add_argument("--pathway", action="store_true", help="show pathway allele lineage")
 
-    compete_parser = subparsers.add_parser("compete", help="run allele competition trials")
+    compete_parser = subparsers.add_parser("compete", help="run allele competition trials", parents=[_shared_args])
     compete_parser.add_argument("locus", help="locus to compete")
     compete_parser.add_argument("--input", required=True, help="test input JSON string")
     compete_parser.add_argument("--rounds", type=int, default=10, help="number of trial rounds (default: 10)")
 
-    dash_parser = subparsers.add_parser("dashboard", help="start web dashboard")
+    dash_parser = subparsers.add_parser("dashboard", help="start web dashboard", parents=[_shared_args])
     dash_parser.add_argument("--port", type=int, default=8420, help="port (default: 8420)")
     dash_parser.add_argument("--host", default="127.0.0.1", help="host (default: 127.0.0.1)")
 
-    evolve_parser = subparsers.add_parser("evolve", help="generate a new contract via LLM")
+    evolve_parser = subparsers.add_parser("evolve", help="generate a new contract via LLM", parents=[_shared_args])
     evolve_parser.add_argument("--family", default="diagnostic",
                                choices=["configuration", "diagnostic"],
                                help="gene family (default: diagnostic)")
@@ -1479,38 +1495,38 @@ def main() -> None:
     evolve_parser.add_argument("--discover-failures", metavar="LOCUS",
                                help="show pending failure mode proposals (use 'all' for all loci)")
 
-    share_parser = subparsers.add_parser("share", help="push successful alleles to peers")
+    share_parser = subparsers.add_parser("share", help="push successful alleles to peers", parents=[_shared_args])
     share_parser.add_argument("locus", help="locus to share")
     share_parser.add_argument("--peer", help="specific peer URL (default: all peers)")
 
-    pull_parser = subparsers.add_parser("pull", help="fetch alleles from peers")
+    pull_parser = subparsers.add_parser("pull", help="fetch alleles from peers", parents=[_shared_args])
     pull_parser.add_argument("locus", help="locus to pull")
     pull_parser.add_argument("--peer", help="specific peer URL (default: all peers)")
 
-    test_parser = subparsers.add_parser("test", help="run contract conformance tests")
+    test_parser = subparsers.add_parser("test", help="run contract conformance tests", parents=[_shared_args])
     test_parser.add_argument("locus", nargs="?", help="specific locus to test")
     test_parser.add_argument("--verbose", "-v", action="store_true", help="show all check details")
 
-    probe_parser = subparsers.add_parser("probe", help="explore input-space edge cases")
+    probe_parser = subparsers.add_parser("probe", help="explore input-space edge cases", parents=[_shared_args])
     probe_parser.add_argument("locus", nargs="?", help="locus to probe (all if omitted)")
     probe_parser.add_argument("--count", type=int, default=10,
                               help="number of probes per locus (default: 10)")
 
-    diff_parser = subparsers.add_parser("diff", help="compare genome states")
+    diff_parser = subparsers.add_parser("diff", help="compare genome states", parents=[_shared_args])
     diff_parser.add_argument("--snapshot", help="compare current to this snapshot")
     diff_parser.add_argument("--a", help="first snapshot (with --b)")
     diff_parser.add_argument("--b", help="second snapshot (with --a)")
 
-    snap_parser = subparsers.add_parser("snapshot", help="create a genome snapshot")
+    snap_parser = subparsers.add_parser("snapshot", help="create a genome snapshot", parents=[_shared_args])
     snap_parser.add_argument("--name", help="snapshot name (auto-generated if omitted)")
     snap_parser.add_argument("--description", default="", help="snapshot description")
 
-    rollback_parser = subparsers.add_parser("rollback", help="restore genome from snapshot")
+    rollback_parser = subparsers.add_parser("rollback", help="restore genome from snapshot", parents=[_shared_args])
     rollback_parser.add_argument("name", help="snapshot name to restore")
 
-    subparsers.add_parser("snapshots", help="list all genome snapshots")
+    subparsers.add_parser("snapshots", help="list all genome snapshots", parents=[_shared_args])
 
-    pool_parser = subparsers.add_parser("pool", help="manage gene pool membership")
+    pool_parser = subparsers.add_parser("pool", help="manage gene pool membership", parents=[_shared_args])
     pool_sub = pool_parser.add_subparsers(dest="pool_command")
     pool_sub.add_parser("list", help="show configured pools and membership")
     pool_push = pool_sub.add_parser("push", help="push allele(s) to a pool")
@@ -1532,9 +1548,9 @@ def main() -> None:
     pool_serve.add_argument("--reciprocity", type=int, default=1,
                             help="min pushes before pulls allowed (0 disables, default: 1)")
 
-    subparsers.add_parser("loci", help="show cross-locus failure proposals")
+    subparsers.add_parser("loci", help="show cross-locus failure proposals", parents=[_shared_args])
 
-    daemon_parser = subparsers.add_parser("daemon", help="run continuous evolutionary loop")
+    daemon_parser = subparsers.add_parser("daemon", help="run continuous evolutionary loop", parents=[_shared_args])
     daemon_parser.add_argument("--tick-interval", type=float, default=60.0,
                                help="seconds between ticks (default: 60)")
     daemon_parser.add_argument("--max-ticks", type=int, default=None,
@@ -1546,7 +1562,7 @@ def main() -> None:
     daemon_parser.add_argument("--dashboard-port", type=int, default=8420,
                                help="dashboard port (default: 8420)")
 
-    contracts_parser = subparsers.add_parser("contracts", help="manage contract evolution proposals")
+    contracts_parser = subparsers.add_parser("contracts", help="manage contract evolution proposals", parents=[_shared_args])
     contracts_sub = contracts_parser.add_subparsers(dest="contracts_command")
     contracts_proposals = contracts_sub.add_parser("proposals", help="show pending proposals")
     contracts_proposals.add_argument("locus", nargs="?", help="filter by locus")
@@ -1557,23 +1573,23 @@ def main() -> None:
     contracts_reject.add_argument("locus", help="locus name")
     contracts_reject.add_argument("index", type=int, help="proposal index")
 
-    spec_parser = subparsers.add_parser("speciation", help="show speciation analysis")
+    spec_parser = subparsers.add_parser("speciation", help="show speciation analysis", parents=[_shared_args])
     spec_sub = spec_parser.add_subparsers(dest="speciation_command")
     spec_sub.add_parser("detect", help="detect speciation events between organisms")
     spec_sub.add_parser("divergence", help="show divergence metrics")
 
-    subparsers.add_parser("safety", help="show adaptive safety recommendations")
+    subparsers.add_parser("safety", help="show adaptive safety recommendations", parents=[_shared_args])
 
-    subparsers.add_parser("recover", help="rebuild registry index from source files")
+    subparsers.add_parser("recover", help="rebuild registry index from source files", parents=[_shared_args])
 
-    new_plugin_parser = subparsers.add_parser("new-plugin", help="scaffold a new domain plugin")
+    new_plugin_parser = subparsers.add_parser("new-plugin", help="scaffold a new domain plugin", parents=[_shared_args])
     new_plugin_parser.add_argument("name", help="plugin name (e.g., 'storage', 'monitoring')")
     new_plugin_parser.add_argument("--output-dir", default="plugins",
                                     help="parent directory for the plugin (default: plugins/)")
 
-    subparsers.add_parser("kernels", help="list available kernels")
+    subparsers.add_parser("kernels", help="list available kernels", parents=[_shared_args])
 
-    comp_parser = subparsers.add_parser("completions", help="generate shell completions")
+    comp_parser = subparsers.add_parser("completions", help="generate shell completions", parents=[_shared_args])
     comp_parser.add_argument("shell", choices=["bash", "zsh", "fish"],
                              help="shell type")
 

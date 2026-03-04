@@ -15,9 +15,9 @@ claude = ["httpx>=0.27"]
 openai = ["httpx>=0.27"]
 deepseek = ["httpx>=0.27"]
 federation = ["httpx>=0.27"]
-network = ["sg-network>=0.2.0"]
-all = ["software-genomics[dashboard,claude,openai,deepseek,federation,network]"]
-dev = ["pytest>=8.0", "sg-network>=0.2.0"]
+data = ["sg-data>=0.2.0"]
+all = ["software-genomics[dashboard,claude,openai,deepseek,federation,data]"]
+dev = ["pytest>=8.0", "sg-data>=0.2.0"]
 
 [project.scripts]
 sg = "sg.cli:main"

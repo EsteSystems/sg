@@ -8,11 +8,12 @@ dependencies = [
     "software-genomics>=0.2.0",
 ]
 
-[project.entry-points."sg.kernels"]
-mock = "sg_network.mock:MockNetworkKernel"
-network-mock = "sg_network.mock:MockNetworkKernel"
-production = "sg_network.production:ProductionNetworkKernel"
-network-production = "sg_network.production:ProductionNetworkKernel"
+# Network plugin shelved — entry points disabled
+# [project.entry-points."sg.kernels"]
+# mock = "sg_network.mock:MockNetworkKernel"
+# network-mock = "sg_network.mock:MockNetworkKernel"
+# production = "sg_network.production:ProductionNetworkKernel"
+# network-production = "sg_network.production:ProductionNetworkKernel"
 
 [tool.setuptools.packages.find]
 include = ["sg_network*"]

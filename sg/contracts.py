@@ -224,9 +224,11 @@ def validate_output(
         return False
     if not isinstance(data["success"], bool):
         return False
+    if not data["success"]:
+        return False
 
     # Schema enforcement: when success=True and contract available
-    if data["success"] and contract_store is not None:
+    if contract_store is not None:
         gene = contract_store.get_gene(locus)
         if gene is not None and gene.gives:
             if not _validate_gives_schema(data, gene.gives):

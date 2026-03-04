@@ -79,9 +79,15 @@ class ProductionDataKernel(DataKernel):
     # --- HTTP operations ---
 
     def http_get(self, url: str, headers: dict | None = None) -> dict:
+        import ssl
         req = urllib.request.Request(url, headers=headers or {})
+        ctx = None
+        if os.environ.get("SG_HTTP_INSECURE", "").strip() in ("1", "true", "yes"):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
         try:
-            with urllib.request.urlopen(req, timeout=self._http_timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self._http_timeout, context=ctx) as resp:
                 body = resp.read().decode("utf-8")
         except urllib.error.URLError as e:
             raise ConnectionError(f"HTTP GET failed: {e}") from e
@@ -90,8 +96,11 @@ class ProductionDataKernel(DataKernel):
         if "json" in content_type or body.strip().startswith(("{", "[")):
             return json.loads(body)
 
-        reader = csv.DictReader(io.StringIO(body))
-        records = list(reader)
+        reader = csv.DictReader(io.StringIO(body), skipinitialspace=True)
+        records = []
+        for row in reader:
+            cleaned = {k.strip(): v for k, v in row.items() if k is not None}
+            records.append(cleaned)
         return {"records": records}
 
     # --- Database operations ---
@@ -103,17 +112,19 @@ class ProductionDataKernel(DataKernel):
         if self._dry_run:
             return len(records)
 
-        columns = list(records[0].keys())
-        placeholders = ", ".join("?" for _ in columns)
-        col_names = ", ".join(f'"{c}"' for c in columns)
+        columns = [k.strip().strip('"') for k in records[0].keys()]
+        safe_cols = [f"col_{c}" if c[:1].isdigit() else c for c in columns]
+        placeholders = ", ".join("?" for _ in safe_cols)
+        col_names = ", ".join(f'"{c}"' for c in safe_cols)
         sql = f'INSERT INTO "{table}" ({col_names}) VALUES ({placeholders})'
 
-        col_defs = ", ".join(f'"{c}" TEXT' for c in columns)
+        col_defs = ", ".join(f'"{c}" TEXT' for c in safe_cols)
         create_sql = f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})'
 
+        orig_columns = list(records[0].keys())
         with self._connect() as conn:
             conn.execute(create_sql)
-            rows = [tuple(r.get(c) for c in columns) for r in records]
+            rows = [tuple(r.get(c) for c in orig_columns) for r in records]
             conn.executemany(sql, rows)
 
         self.track_resource("table_rows", f"{connection}.{table}")

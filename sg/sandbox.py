@@ -34,7 +34,7 @@ BLOCKED_MODULES = frozenset({
 ALLOWED_MODULES = frozenset({
     "json", "math", "re", "hashlib", "datetime", "collections",
     "itertools", "functools", "copy", "string", "textwrap",
-    "collections.abc",
+    "collections.abc", "csv", "io", "base64", "uuid",
 })
 
 DEFAULT_TIMEOUT = 30  # seconds

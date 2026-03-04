@@ -64,9 +64,17 @@ class MockDataKernel(DataKernel):
 
     def http_get(self, url: str, headers: dict | None = None) -> dict:
         self._check_failure("http_get")
-        if url not in self._http_responses:
-            raise ValueError(f"no mock response for URL: {url}")
-        return self._http_responses[url]
+        if url in self._http_responses:
+            return self._http_responses[url]
+        return self._synthesize_csv_response(url)
+
+    def _synthesize_csv_response(self, url: str) -> dict:
+        """Generate synthetic CSV-like records when no mock is registered."""
+        records = [
+            {"id": i, "name": f"row_{i}", "value": i * 10}
+            for i in range(1, 11)
+        ]
+        return {"status": 200, "records": records, "source": url}
 
     # --- Database operations ---
 
@@ -79,7 +87,14 @@ class MockDataKernel(DataKernel):
 
     def write_records(self, connection: str, table: str, records: list[dict]) -> int:
         self._check_failure("write_records")
-        tbl = self._get_table(connection, table)
+        try:
+            tbl = self._get_table(connection, table)
+        except ValueError:
+            columns = {}
+            if records:
+                columns = {k: "text" for k in records[0].keys()}
+            self.add_table(connection, table, columns)
+            tbl = self._get_table(connection, table)
         tbl.rows.extend(records)
         self.track_resource("table_rows", f"{connection}.{table}")
         return len(records)

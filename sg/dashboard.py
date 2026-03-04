@@ -136,6 +136,12 @@ def api_pathways():
         fitness_rec = pft.get_record(name)
         pw_alleles = pr.get_for_pathway(name)
         pw_dominant = pheno.get_pathway_dominant(name)
+        pw_contract = cs.get_pathway(name)
+        defaults = {}
+        if pw_contract:
+            for f in pw_contract.takes:
+                if f.default is not None:
+                    defaults[f.name] = f.default
         result.append({
             "name": name,
             "fused": bool(fusion and fusion.fused_sha),
@@ -149,6 +155,7 @@ def api_pathways():
             "consecutive_failures": fitness_rec.consecutive_failures if fitness_rec else 0,
             "pathway_allele_count": len(pw_alleles),
             "dominant_pathway_allele": pw_dominant[:12] if pw_dominant else None,
+            "defaults": defaults,
         })
     return result
 
@@ -402,6 +409,18 @@ async def api_run(request: Request):
             from sg.meta_params import MetaParamTracker
 
             contract_store = load_contract_store(root)
+
+            # Merge contract defaults with provided input
+            defaults = {}
+            pw_contract = contract_store.get_pathway(pathway_name)
+            if pw_contract:
+                for f in pw_contract.takes:
+                    if f.default is not None:
+                        defaults[f.name] = f.default
+            provided = json.loads(input_json) if input_json else {}
+            defaults.update(provided)
+            final_input = json.dumps(defaults)
+
             registry = Registry.open(root / ".sg" / "registry")
             phenotype = PhenotypeMap.load(root / "phenotype.toml")
             fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
@@ -420,7 +439,7 @@ async def api_run(request: Request):
                 meta_param_tracker=meta_tracker,
             )
 
-            outputs = orch.run_pathway(pathway_name, input_json)
+            outputs = orch.run_pathway(pathway_name, final_input)
             orch.verify_scheduler.wait()
             orch.save_state()
 
@@ -637,138 +656,6 @@ def api_daemon_status():
 _daemon_ref: dict | None = None
 
 
-# Pipeline endpoints
-
-@app.get("/api/pipelines")
-def api_pipelines():
-    """List all defined pipelines with source/sink/through info."""
-    cs, _, _, _, _, _, _ = _load_state()
-    from sg.pipeline import build_pipeline_input
-    result = []
-    for name in cs.known_pipelines():
-        p = cs.get_pipeline(name)
-        if p is None:
-            continue
-        constructed_input = build_pipeline_input(p)
-        result.append({
-            "name": p.name,
-            "domain": p.domain,
-            "does": p.does,
-            "source_type": p.source.source_type.value if p.source else None,
-            "source_props": p.source.properties if p.source else {},
-            "sink_type": p.sink.sink_type.value if p.sink else None,
-            "sink_props": p.sink.properties if p.sink else {},
-            "through": p.through,
-            "bind": p.bind,
-            "schedule": p.schedule,
-            "constructed_input": constructed_input,
-        })
-    return {"pipelines": result}
-
-
-@app.get("/api/pipeline/{name}")
-def api_pipeline_detail(name: str):
-    """Get full details for a single pipeline."""
-    cs, _, _, _, _, _, _ = _load_state()
-    from sg.pipeline import build_pipeline_input
-    p = cs.get_pipeline(name)
-    if p is None:
-        return JSONResponse({"error": f"pipeline '{name}' not found"}, status_code=404)
-    return {
-        "name": p.name,
-        "domain": p.domain,
-        "does": p.does,
-        "source_type": p.source.source_type.value if p.source else None,
-        "source_props": p.source.properties if p.source else {},
-        "sink_type": p.sink.sink_type.value if p.sink else None,
-        "sink_props": p.sink.properties if p.sink else {},
-        "through": p.through,
-        "bind": p.bind,
-        "schedule": p.schedule,
-        "constructed_input": build_pipeline_input(p),
-    }
-
-
-@app.post("/api/pipeline/run")
-async def api_pipeline_run(request: Request):
-    """Run a pipeline in background — auto-constructs input from source/sink/bind."""
-    data = await request.json()
-    pipeline_name = data.get("pipeline")
-    kernel_name = data.get("kernel", "data-mock")
-    input_override = data.get("override")
-
-    if not pipeline_name:
-        return JSONResponse({"error": "pipeline is required"}, status_code=400)
-
-    job_id = _uuid.uuid4().hex[:12]
-    _jobs[job_id] = {"status": "running", "type": "pipeline", "pipeline": pipeline_name}
-    _prune_jobs()
-
-    def _do_pipeline_run():
-        root = _project_root
-        try:
-            from sg.kernel.discovery import load_kernel
-            from sg.cli import load_contract_store
-            from sg.orchestrator import Orchestrator
-            from sg.mutation import MockMutationEngine
-            from sg.meta_params import MetaParamTracker
-            from sg.pipeline import build_pipeline_input, run_pipeline
-
-            contract_store = load_contract_store(root)
-            p = contract_store.get_pipeline(pipeline_name)
-            if p is None:
-                _jobs[job_id] = {"status": "done", "type": "pipeline", "success": False,
-                                 "error": f"pipeline '{pipeline_name}' not found"}
-                return
-
-            registry = Registry.open(root / ".sg" / "registry")
-            phenotype = PhenotypeMap.load(root / "phenotype.toml")
-            fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
-            kernel = load_kernel(kernel_name)
-            pft = PathwayFitnessTracker.open(root / "pathway_fitness.json")
-            pr = PathwayRegistry.open(root / ".sg" / "pathway_registry")
-            meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
-            mutation_engine = MockMutationEngine(root / "fixtures")
-
-            orch = Orchestrator(
-                registry=registry, phenotype=phenotype,
-                mutation_engine=mutation_engine, fusion_tracker=fusion_tracker,
-                kernel=kernel, contract_store=contract_store,
-                project_root=root,
-                pathway_fitness_tracker=pft, pathway_registry=pr,
-                meta_param_tracker=meta_tracker,
-            )
-
-            result = run_pipeline(p, orch, input_override)
-            try:
-                orch.verify_scheduler.wait()
-                orch.save_state()
-            except Exception:
-                pass
-
-            steps = []
-            for i, out in enumerate(result.outputs):
-                try:
-                    parsed = json.loads(out)
-                except Exception:
-                    parsed = out
-                steps.append({"step": i + 1, "output": parsed})
-
-            _jobs[job_id] = {
-                "status": "done", "type": "pipeline", "success": result.success,
-                "pipeline": pipeline_name, "pathway": result.pathway_name,
-                "input": json.loads(result.input_json) if result.input_json else {},
-                "steps": steps,
-                "error": result.error,
-            }
-        except Exception as e:
-            _jobs[job_id] = {"status": "done", "type": "pipeline", "success": False,
-                             "error": str(e)}
-
-    asyncio.get_event_loop().run_in_executor(None, _do_pipeline_run)
-    return {"job_id": job_id, "status": "running"}
-
-
 # Federation endpoints (used by sg share/pull)
 
 @app.post("/api/federation/receive")
@@ -879,19 +766,6 @@ body.detail-open { grid-template-columns:220px 1fr 300px; }
 #command-bar label { color:var(--text-dim); font-size:10px; text-transform:uppercase; }
 .cmd-group { display:flex; align-items:center; gap:6px; }
 .cmd-count { width:40px; text-align:center; }
-#command-bar .btn-pipeline { background:#06f1; color:#4af; border-color:#4af; }
-#command-bar .btn-pipeline:hover { background:#06f3; }
-
-/* Pipeline Info Banner */
-#pipeline-info { grid-column:1/-1; background:var(--bg-panel); border-bottom:1px solid var(--border);
-  padding:6px 16px; display:flex; align-items:center; gap:16px; font-size:11px; }
-.pipeline-flow { display:flex; align-items:center; gap:8px; }
-.pipe-node { padding:4px 10px; border-radius:3px; font-weight:bold; }
-.pipe-node.source { background:#06f2; color:#4af; border:1px solid #4af5; }
-.pipe-node.pathway { background:#0f02; color:var(--success); border:1px solid var(--success); }
-.pipe-node.sink { background:#f802; color:var(--warning); border:1px solid var(--warning); }
-.pipe-arrow { color:var(--text-dim); font-size:14px; }
-.pipe-details { color:var(--text-dim); font-size:10px; flex:1; }
 
 /* Output Toast */
 #output-toast { position:fixed; bottom:16px; right:16px; max-width:520px; max-height:60vh;
@@ -1075,26 +949,18 @@ body.detail-open #detail { display:block; }
 <!-- Command Bar -->
 <div id="command-bar">
   <div class="cmd-group">
-    <label>Pipeline</label>
-    <select id="cmd-pipeline" onchange="onPipelineSelect()">
-      <option value="">(manual)</option>
-    </select>
-  </div>
-  <div class="cmd-group">
     <label>Kernel</label>
     <select id="cmd-kernel"></select>
   </div>
-  <button class="btn-pipeline" onclick="cmdPipelineRun()" title="Run selected pipeline">Run Pipeline</button>
-  <div class="sep"></div>
   <div class="cmd-group">
     <label>Pathway</label>
-    <select id="cmd-pathway"></select>
+    <select id="cmd-pathway" onchange="onPathwaySelect()"></select>
   </div>
   <div class="cmd-group">
     <label>Input</label>
     <input id="cmd-input" class="json-input" type="text" placeholder='{"key": "value"}' value="{}">
   </div>
-  <button class="btn-run" onclick="cmdRun()" title="Run pathway (manual input)">Run</button>
+  <button class="btn-run" onclick="cmdRun()" title="Run pathway">Run</button>
   <div class="sep"></div>
   <div class="cmd-group">
     <label>Locus</label>
@@ -1120,17 +986,6 @@ body.detail-open #detail { display:block; }
   </div>
 </div>
 
-<!-- Pipeline Info Banner -->
-<div id="pipeline-info" style="display:none">
-  <div class="pipeline-flow">
-    <span class="pipe-node source" id="pipe-src">source</span>
-    <span class="pipe-arrow">&rarr;</span>
-    <span class="pipe-node pathway" id="pipe-through">pathway</span>
-    <span class="pipe-arrow">&rarr;</span>
-    <span class="pipe-node sink" id="pipe-sink">sink</span>
-  </div>
-  <div class="pipe-details" id="pipe-details"></div>
-</div>
 
 <!-- Output Toast -->
 <div id="output-toast">
@@ -2126,10 +1981,7 @@ function loadHash() {
 // COMMAND BAR
 // ══════════════════════════════════════════
 
-let _pipelines = [];
-
 async function initCommandBar() {
-  // Populate kernels
   const kernelData = await fetchJSON('/api/kernels');
   const kernelSel = document.getElementById('cmd-kernel');
   kernelSel.innerHTML = '';
@@ -2139,20 +1991,6 @@ async function initCommandBar() {
       opt.value = k.name; opt.textContent = k.name;
       if(k.name === 'data-production') opt.selected = true;
       kernelSel.appendChild(opt);
-    });
-  }
-
-  // Populate pipelines
-  const pipeData = await fetchJSON('/api/pipelines');
-  const pipeSel = document.getElementById('cmd-pipeline');
-  pipeSel.innerHTML = '<option value="">(manual)</option>';
-  if(pipeData?.pipelines) {
-    _pipelines = pipeData.pipelines;
-    pipeData.pipelines.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p.name;
-      opt.textContent = p.name;
-      pipeSel.appendChild(opt);
     });
   }
 }
@@ -2165,6 +2003,9 @@ function updateCommandBarSelectors() {
   state.pathways.forEach(p => {
     const opt = document.createElement('option');
     opt.value = p.name; opt.textContent = p.name;
+    if(p.defaults && Object.keys(p.defaults).length > 0) {
+      opt.dataset.defaults = JSON.stringify(p.defaults);
+    }
     if(p.name === curPw) opt.selected = true;
     pwSel.appendChild(opt);
   });
@@ -2209,13 +2050,6 @@ async function pollJob(jobId, title) {
         });
         if(data.promoted) lines.push('PROMOTED: ' + data.promoted + ' is the new dominant');
         msg = lines.join('\\n');
-      } else if(data.type === 'pipeline' && data.steps) {
-        const lines = ['Pipeline: ' + (data.pipeline || '') + ' via ' + (data.pathway || '')];
-        data.steps.forEach(s => {
-          const out = typeof s.output === 'object' ? JSON.stringify(s.output) : s.output;
-          lines.push('Step ' + s.step + ': ' + (out || '').substring(0, 120));
-        });
-        msg = lines.join('\\n');
       }
       showToast(title, msg, false);
     }
@@ -2225,54 +2059,15 @@ async function pollJob(jobId, title) {
   poll();
 }
 
-function onPipelineSelect() {
-  const sel = document.getElementById('cmd-pipeline');
+function onPathwaySelect() {
+  const sel = document.getElementById('cmd-pathway');
   const name = sel.value;
-  const infoEl = document.getElementById('pipeline-info');
-  const inputEl = document.getElementById('cmd-input');
-
-  if(!name) {
-    infoEl.style.display = 'none';
-    return;
+  if(!name) return;
+  const opt = sel.options[sel.selectedIndex];
+  const defaults = opt.dataset.defaults;
+  if(defaults) {
+    document.getElementById('cmd-input').value = defaults;
   }
-
-  const p = _pipelines.find(x => x.name === name);
-  if(!p) { infoEl.style.display = 'none'; return; }
-
-  document.getElementById('pipe-src').textContent = (p.source_type || 'none') +
-    (p.source_props?.url ? ': ' + p.source_props.url.split('/').pop() : '');
-  document.getElementById('pipe-through').textContent = p.through || 'none';
-  document.getElementById('pipe-sink').textContent = (p.sink_type || 'none') +
-    (p.sink_props?.table ? '.' + p.sink_props.table : '');
-  document.getElementById('pipe-details').textContent = p.does ? p.does.substring(0, 120) : '';
-
-  inputEl.value = JSON.stringify(p.constructed_input || {});
-  infoEl.style.display = 'flex';
-
-  // Also set the pathway selector to match
-  const pwSel = document.getElementById('cmd-pathway');
-  if(p.through) {
-    for(let i = 0; i < pwSel.options.length; i++) {
-      if(pwSel.options[i].value === p.through) { pwSel.selectedIndex = i; break; }
-    }
-  }
-}
-
-async function cmdPipelineRun() {
-  const pipeline = document.getElementById('cmd-pipeline').value;
-  const kernel = document.getElementById('cmd-kernel').value;
-  if(!pipeline) { showToast('Pipeline Error', 'Select a pipeline first', true); return; }
-
-  showToast('Running pipeline...', pipeline + ' with ' + kernel, false);
-  try {
-    const resp = await fetch('/api/pipeline/run', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({pipeline, kernel}),
-    });
-    const data = await resp.json();
-    if(data.error) { showToast('Pipeline Failed', data.error, true); }
-    else { pollJob(data.job_id, 'Pipeline: ' + pipeline); }
-  } catch(e) { showToast('Pipeline Error', e.message, true); }
 }
 
 async function cmdRun() {

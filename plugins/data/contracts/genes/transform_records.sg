@@ -31,6 +31,9 @@ gene transform_records for data
     - target table does not exist -> success=false
     - mapping references nonexistent columns -> success=false
 
+  connects:
+    connection  sqlite  "Database for read/write"
+
   verify:
     check_row_count connection={connection} table={target_table}
     within 30s

@@ -31,6 +31,10 @@ gene ingest_csv_to_table for data
     - table does not exist -> error
     - schema mismatch -> success=false
 
+  connects:
+    url         https   "CSV dataset endpoint"
+    connection  sqlite  "Warehouse database"
+
   verify:
     check_row_count connection={connection} table={table}
     within 30s

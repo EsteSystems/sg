@@ -12,7 +12,7 @@ from pathlib import Path
 from sg.log import get_logger
 from sg.parser.parser import parse_sg
 from sg.parser.types import (
-    GeneContract, PathwayContract, TopologyContract, PipelineContract,
+    GeneContract, PathwayContract, TopologyContract,
     GeneFamily, BlastRadius, FieldDef,
 )
 
@@ -87,7 +87,6 @@ class ContractStore:
         self.genes: dict[str, GeneContract] = {}
         self.pathways: dict[str, PathwayContract] = {}
         self.topologies: dict[str, TopologyContract] = {}
-        self.pipelines: dict[str, PipelineContract] = {}
         self._info_cache: dict[str, ContractInfo] = {}
 
     def load_directory(self, contracts_dir: Path) -> None:
@@ -121,8 +120,6 @@ class ContractStore:
             self.pathways[contract.name] = contract
         elif isinstance(contract, TopologyContract):
             self.topologies[contract.name] = contract
-        elif isinstance(contract, PipelineContract):
-            self.pipelines[contract.name] = contract
 
     def contract_info(self, locus: str) -> ContractInfo:
         """Return runtime contract metadata for a gene locus."""
@@ -147,13 +144,6 @@ class ContractStore:
 
     def get_topology(self, name: str) -> TopologyContract | None:
         return self.topologies.get(name)
-
-    def get_pipeline(self, name: str) -> PipelineContract | None:
-        return self.pipelines.get(name)
-
-    def known_pipelines(self) -> list[str]:
-        """Return all known pipeline names."""
-        return list(self.pipelines.keys())
 
     def known_topologies(self) -> list[str]:
         """Return all known topology names."""

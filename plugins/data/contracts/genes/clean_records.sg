@@ -29,6 +29,9 @@ gene clean_records for data
     - table does not exist -> success=false
     - table has no rows -> success=false
 
+  connects:
+    connection  sqlite  "Database for read/write"
+
   verify:
     check_nulls connection={connection} table={table} column="id"
     within 30s

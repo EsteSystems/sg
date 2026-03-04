@@ -20,6 +20,9 @@ gene check_row_count for data
   verify:
     - table has at least one row
 
+  connects:
+    connection  sqlite  "Database to inspect"
+
   feeds:
     ingest_csv_to_table convergence
 

@@ -51,6 +51,21 @@ class FeedsDef:
 
 
 @dataclass
+class ConnectsDef:
+    """A connects declaration: marks a takes parameter as a telomeric interface.
+
+    Telomeric parameters are external system interfaces (URLs, database
+    connections, API endpoints) — the boundary between the genome and the
+    outside world.  The interface field is a free-form protocol/interface
+    name chosen by the domain expert: https, sqlite, postgresql, kafka,
+    s3, ftp, grpc, csv, mqtt, smtp, etc.
+    """
+    param: str
+    interface: str
+    description: str = ""
+
+
+@dataclass
 class GeneContract:
     """Parsed gene contract from a .sg file."""
     name: str
@@ -68,6 +83,7 @@ class GeneContract:
     verify: list[VerifyStep] = field(default_factory=list)
     verify_within: str | None = None
     feeds: list[FeedsDef] = field(default_factory=list)
+    connects: list[ConnectsDef] = field(default_factory=list)
 
 
 @dataclass
@@ -138,48 +154,3 @@ class TopologyContract:
     verify: list[VerifyStep] = field(default_factory=list)
     verify_within: str | None = None
     on_failure: str = "preserve what works"
-
-
-class SourceType(str, Enum):
-    HTTP_CSV = "http_csv"
-    HTTP_JSON = "http_json"
-    SQLITE = "sqlite"
-    FILE_CSV = "file_csv"
-    POSTGRES = "postgres"
-
-
-class SinkType(str, Enum):
-    SQLITE = "sqlite"
-    FILE_CSV = "file_csv"
-    POSTGRES = "postgres"
-
-
-@dataclass
-class SourceDecl:
-    """A data source declaration in a pipeline."""
-    source_type: SourceType
-    properties: dict[str, str] = field(default_factory=dict)
-    schema_fields: list[FieldDef] = field(default_factory=list)
-
-
-@dataclass
-class SinkDecl:
-    """A data sink declaration in a pipeline."""
-    sink_type: SinkType
-    properties: dict[str, str] = field(default_factory=dict)
-    schema_fields: list[FieldDef] = field(default_factory=list)
-
-
-@dataclass
-class PipelineContract:
-    """Parsed pipeline contract from a .sg file."""
-    name: str
-    does: str
-    domain: str | None = None
-    source: SourceDecl | None = None
-    sink: SinkDecl | None = None
-    through: str = ""
-    bind: dict[str, str] = field(default_factory=dict)
-    schedule: str | None = None
-    verify: list[VerifyStep] = field(default_factory=list)
-    verify_within: str | None = None

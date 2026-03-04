@@ -31,8 +31,7 @@ sg/                               # core runtime
 ├── arena.py                      # gene fitness: immediate + convergence + resilience
 ├── fitness.py                    # per-allele fitness history (bounded)
 │
-│  ── Pipeline & Pathway ──
-├── pipeline.py                   # pipeline runtime (source/sink binding, input auto-construction)
+│  ── Pathway ──
 ├── pathway.py                    # pathway execution (fusion-aware, composed, conditional)
 ├── pathway_registry.py           # pathway allele versioning + structure SHAs
 ├── pathway_arena.py              # pathway fitness scoring
@@ -92,7 +91,7 @@ plugins/                          # domain-specific plugins
 │   ├── sg_data/                  # installable package
 │   │   ├── kernel.py             # DataKernel ABC
 │   │   └── mock.py               # MockDataKernel (dev/test)
-│   ├── contracts/                # .sg contracts (genes/, pathways/, pipelines/)
+│   ├── contracts/                # .sg contracts (genes/, pathways/)
 │   ├── genes/                    # seed gene implementations
 │   └── fixtures/                 # mutation fix fixtures
 └── network/                      # network infrastructure domain (shelved)
@@ -115,8 +114,10 @@ plugins/                          # domain-specific plugins
 - Decomposition: 10+ errors with 3+ distinct clusters → auto-split gene into sub-gene pathway
 - Interaction detection: cross-locus testing before promotion (configurable policy: warn/rollback/mutate)
 - Batch mutation: multiple diverse candidates per LLM mutation attempt
-- Contracts are `.sg` files with verb-based sections: does, takes, gives, before, after, fails when, verify, feeds
-- Pipelines are `.sg` files that bind sources and sinks to pathways: source, sink, through, bind, schedule
+- Contracts are `.sg` files with verb-based sections: does, takes, gives, before, after, fails when, verify, feeds, connects
+- Gene contracts declare telomeric interfaces via `connects:` — parameters that bridge the genome to external systems, with free-form protocol/interface types (https, sqlite, postgresql, kafka, s3, ftp, grpc, mqtt, etc.)
+- Pathway `takes` fields support `default=` values, enabling `sg run pathway_name` with no `--input` flag
+- Contracts are the single source of truth — no separate config files for invocation parameters
 
 ## Running
 
@@ -125,9 +126,8 @@ pip install -e ".[dev]"
 pip install -e plugins/data
 pytest
 sg init --kernel data-mock
-sg run ingest_and_validate --input '{...}'
-sg pipeline list
-sg pipeline run ingest_airtravel
+sg run ingest_and_validate                    # uses contract defaults
+sg run ingest_and_validate --input '{...}'     # overrides defaults
 sg status
 ```
 
@@ -136,7 +136,7 @@ sg status
 - **`.sg` contract format**: purpose-built for this paradigm. Verb-based sections (`does`, `takes`, `gives`). Domain experts author contracts, not developers.
 - **Two gene families**: configuration genes act, diagnostic genes observe. Diagnostics produce the fitness signal for configuration genes.
 - **Temporal fitness**: immediate (t=0) + convergence (t=30s) + resilience (t=hours). Retroactive decay when convergence/resilience fail.
-- **Composition hierarchy**: gene → pathway → pipeline → topology → intent. Pipelines bind pathways to concrete data sources and sinks. Pathways compose via `->`, iterate via `for`, bind conditionally via `when`.
+- **Composition hierarchy**: gene → pathway → topology → intent. Pathways compose via `->`, iterate via `for`, bind conditionally via `when`. Pathway contracts carry default parameter values — no separate workload/config concept needed.
 - **Safety**: transactions with undo-log, blast radius classification (none → critical), shadow mode → canary → recessive → dominant allele lifecycle.
 - **Domain-agnostic core**: kernel is an abstract interface. Domain-specific logic lives in plugins. The active plugin is `data` (data pipelines). The `network` plugin validated the architecture but is shelved.
 - **Operational hardening**: atomic writes (temp file + rename), corrupted state recovery (try/except on all loads), shared read locks, fault-isolated save_state.

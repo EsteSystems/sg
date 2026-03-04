@@ -19,6 +19,9 @@ gene validate_schema for data
     extra_columns    string[]  "Columns present but not expected"
     error            string?   "Error message on failure"
 
+  connects:
+    connection  sqlite  "Database to inspect"
+
   feeds:
     ingest_csv_to_table convergence
 

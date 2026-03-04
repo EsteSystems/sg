@@ -23,6 +23,9 @@ gene check_nulls for data
   verify:
     - null ratio is below 10%
 
+  connects:
+    connection  sqlite  "Database to inspect"
+
   feeds:
     ingest_csv_to_table convergence
 

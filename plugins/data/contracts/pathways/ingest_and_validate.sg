@@ -6,10 +6,10 @@ pathway ingest_and_validate for data
     the data quality by checking row count and null values.
 
   takes:
-    url         string  "URL to fetch CSV data from"
-    connection  string  "Database connection name"
-    table       string  "Target table name"
-    column      string  "Column to check for nulls"
+    url         string  "URL to fetch CSV data from"         default="https://people.sc.fsu.edu/~jburkardt/data/csv/airtravel.csv"
+    connection  string  "Database connection name"            default="warehouse"
+    table       string  "Target table name"                  default="airtravel"
+    column      string  "Column to check for nulls"          default="Month"
 
   steps:
     1. ingest_csv_to_table

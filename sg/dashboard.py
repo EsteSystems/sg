@@ -5,9 +5,13 @@ Requires: pip install 'sg[dashboard]' (fastapi + uvicorn).
 """
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 import os
 import time
+import uuid as _uuid
+from collections import OrderedDict
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -33,10 +37,31 @@ _project_root: Path = Path(".")
 _metrics_collector = None  # type: ignore
 
 
+_contract_store_cache = None
+_contract_store_mtime = 0.0
+
+def _load_contracts():
+    """Load contracts, with mtime-based caching to auto-reload on file changes."""
+    global _contract_store_cache, _contract_store_mtime
+    root = _project_root
+    contracts_dir = root / "contracts"
+    try:
+        current_mtime = max(
+            (f.stat().st_mtime for f in contracts_dir.rglob("*.sg")),
+            default=0.0,
+        )
+    except Exception:
+        current_mtime = 0.0
+    if _contract_store_cache is None or current_mtime > _contract_store_mtime:
+        _contract_store_cache = ContractStore.open(contracts_dir)
+        _contract_store_mtime = current_mtime
+    return _contract_store_cache
+
+
 def _load_state():
     """Load all state from disk (fresh on each request)."""
     root = _project_root
-    contract_store = ContractStore.open(root / "contracts")
+    contract_store = _load_contracts()
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap.load(root / "phenotype.toml")
     fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
@@ -279,11 +304,12 @@ def api_pathway_lineage(name: str):
 
 @app.get("/api/events")
 async def api_events():
-    """SSE stream — yields update events when files change."""
+    """SSE stream — yields update events when files change or daemon ticks."""
     root = _project_root
 
     async def event_stream():
         last_mtime = 0.0
+        last_tick = 0
         while True:
             current = 0.0
             for f in [root / "phenotype.toml",
@@ -296,7 +322,12 @@ async def api_events():
             if current > last_mtime and last_mtime > 0:
                 yield f"data: {{\"type\": \"update\", \"time\": {current}}}\n\n"
             last_mtime = current
-            import asyncio
+
+            if _daemon.tick_count != last_tick:
+                last_tick = _daemon.tick_count
+                d = json.dumps({"type": "daemon_tick", **_daemon.to_dict()})
+                yield f"data: {d}\n\n"
+
             await asyncio.sleep(2)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -438,14 +469,139 @@ async def api_contract_save(name: str, request: Request):
         path.parent.mkdir(parents=True, exist_ok=True)
 
     path.write_text(source)
+    global _contract_store_cache, _contract_store_mtime
+    _contract_store_cache = None
+    _contract_store_mtime = 0.0
     return {"ok": True, "name": new_name, "path": str(path)}
 
 
-# ── Action endpoints (control plane) ──────────────────────────────────
+@app.post("/api/pathway/draft")
+async def api_pathway_draft(request: Request):
+    """Generate a pathway .sg contract from a natural language intent."""
+    data = await request.json()
+    intent = data.get("intent", "").strip()
+    engine_name = data.get("mutation_engine", "deepseek")
+    kernel_name = data.get("kernel", "data-mock")
 
-import asyncio
-import uuid as _uuid
-from collections import OrderedDict
+    if not intent:
+        return JSONResponse({"error": "intent is required"}, status_code=400)
+
+    job_id = _uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "type": "draft_pathway"}
+    _prune_jobs()
+
+    def _do_draft():
+        root = _project_root
+        try:
+            from sg.cli import load_contract_store, make_mutation_engine
+            from sg.kernel.discovery import load_kernel
+            import argparse
+
+            contract_store = load_contract_store(root)
+            kernel = load_kernel(kernel_name)
+            args_ns = argparse.Namespace(mutation_engine=engine_name, model=None, kernel=kernel_name)
+            mutation_engine = make_mutation_engine(args_ns, root, contract_store, kernel=kernel)
+
+            gene_summaries = []
+            for locus in contract_store.known_loci():
+                gene = contract_store.get_gene(locus)
+                if gene is None:
+                    continue
+                takes = ", ".join(f"{f.name}: {f.type}" for f in gene.takes)
+                gives = ", ".join(f"{f.name}: {f.type}" for f in gene.gives)
+                defaults = {f.name: f.default for f in gene.takes if f.default is not None}
+                gene_summaries.append(
+                    f"  gene {locus}: {gene.does.strip()}\n"
+                    f"    takes({takes})\n"
+                    f"    gives({gives})"
+                    + (f"\n    defaults: {defaults}" if defaults else "")
+                )
+
+            genes_text = "\n".join(gene_summaries)
+
+            example = (
+                'pathway example_name for data\n'
+                '  risk low\n\n'
+                '  does:\n'
+                '    Description of what this pathway does.\n\n'
+                '  takes:\n'
+                '    url         string  "URL to fetch data"  default="https://example.com/data.csv"\n'
+                '    connection  string  "Database connection" default="warehouse"\n\n'
+                '  steps:\n'
+                '    1. first_gene\n'
+                '         param1 = {url}\n'
+                '         param2 = {connection}\n\n'
+                '    2. second_gene\n'
+                '         connection = {connection}\n\n'
+                '  on failure:\n'
+                '    rollback all\n'
+            )
+
+            prompt = (
+                f"Generate a Software Genomics pathway contract in .sg format.\n\n"
+                f"User intent: {intent}\n\n"
+                f"Available genes:\n{genes_text}\n\n"
+                f"Rules:\n"
+                f"- Use ONLY genes from the list above\n"
+                f"- Wire step parameters using {{param_name}} bindings from the takes section\n"
+                f"- Include default= values for all takes fields\n"
+                f"- Use 'on failure: rollback all' unless the intent suggests otherwise\n"
+                f"- Pick a descriptive snake_case name for the pathway\n"
+                f"- Set the domain to match the genes' domain\n\n"
+                f"Example format:\n```\n{example}```\n\n"
+                f"Return ONLY the .sg contract text, no explanations."
+            )
+
+            response = mutation_engine._call_api(prompt)
+
+            # Extract .sg content from response
+            sg_source = response.strip()
+            if "```" in sg_source:
+                blocks = sg_source.split("```")
+                for block in blocks[1:]:
+                    cleaned = block.strip()
+                    if cleaned.startswith("sg\n") or cleaned.startswith("sg\r"):
+                        cleaned = cleaned[2:].strip()
+                    elif cleaned.startswith("\n") or cleaned.startswith("pathway"):
+                        pass
+                    if "pathway " in cleaned:
+                        sg_source = cleaned.split("```")[0].strip()
+                        break
+
+            # Validate by parsing
+            from sg.parser.parser import parse_sg
+            from sg.parser.types import PathwayContract as PC
+            contract = parse_sg(sg_source)
+            if not isinstance(contract, PC):
+                _jobs[job_id] = {"status": "done", "type": "draft_pathway", "success": False,
+                                 "error": "LLM generated a non-pathway contract"}
+                return
+
+            parsed = {
+                "type": "pathway",
+                "name": contract.name,
+                "domain": contract.domain or "",
+                "risk": contract.risk or "low",
+                "does": contract.does or "",
+                "takes": [{"name": f.name, "type": f.type_name, "description": f.description or "",
+                           "default": f.default, "optional": f.optional}
+                          for f in contract.takes],
+                "steps": [{"index": s.index, "locus": s.locus, "params": s.params or {}}
+                          for s in contract.steps],
+                "on_failure": contract.on_failure or "",
+            }
+
+            _jobs[job_id] = {"status": "done", "type": "draft_pathway", "success": True,
+                             "source": sg_source, "parsed": parsed}
+        except Exception as e:
+            _jobs[job_id] = {"status": "done", "type": "draft_pathway", "success": False,
+                             "error": str(e)}
+
+    asyncio.get_event_loop().run_in_executor(None, _do_draft)
+    return {"job_id": job_id, "status": "running"}
+
+
+# ── Action endpoints (control plane) ──────────────────────────────────
 
 _jobs: OrderedDict[str, dict] = OrderedDict()
 _MAX_JOBS = 50
@@ -475,19 +631,116 @@ def api_kernels():
     return {"kernels": result}
 
 
+@app.post("/api/init")
+async def api_init(request: Request):
+    """Seed all loci from contracts — hand-written files first, then LLM for the rest."""
+    data = await request.json()
+    kernel_name = data.get("kernel", "data-mock")
+    engine_name = data.get("mutation_engine", "deepseek")
+
+    job_id = _uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "type": "init"}
+    _prune_jobs()
+
+    def _do_init():
+        root = _project_root
+        try:
+            from sg.kernel.discovery import load_kernel
+            from sg.cli import load_contract_store, _discover_seed_genes, make_mutation_engine
+            from sg.pathway import pathway_from_contract
+            from sg.pathway_registry import steps_from_pathway
+            import argparse
+
+            contract_store = load_contract_store(root)
+            registry = Registry.open(root / ".sg" / "registry")
+            phenotype = PhenotypeMap()
+
+            genes_dir = root / "genes"
+            seeds = {}
+            if genes_dir.exists():
+                seeds = _discover_seed_genes(genes_dir, contract_store.known_loci())
+
+            seeded = []
+            for locus, gene_path in seeds.items():
+                source = gene_path.read_text()
+                sha = registry.register(source, locus)
+                phenotype.promote(locus, sha)
+                allele = registry.get(sha)
+                if allele:
+                    allele.state = "dominant"
+                seeded.append({"locus": locus, "sha": sha[:12], "source": "file"})
+
+            unseeded = [l for l in contract_store.known_loci() if l not in seeds]
+            if unseeded and engine_name != "mock":
+                kernel = load_kernel(kernel_name)
+                args_ns = argparse.Namespace(mutation_engine=engine_name, model=data.get("model"), kernel=kernel_name)
+                mutation_engine = make_mutation_engine(args_ns, root, contract_store, kernel=kernel)
+
+                for locus in unseeded:
+                    gene_contract = contract_store.get_gene(locus)
+                    if gene_contract is None:
+                        continue
+                    if hasattr(mutation_engine, '_contract_prompt'):
+                        contract_prompt = mutation_engine._contract_prompt(locus)
+                    else:
+                        info = contract_store.contract_info(locus)
+                        contract_prompt = f"Locus: {locus}\nDescription: {info.description}"
+                    try:
+                        sources = mutation_engine.generate(locus, contract_prompt, 1)
+                        if sources:
+                            sha = registry.register(sources[0], locus, generation=0)
+                            phenotype.promote(locus, sha)
+                            allele = registry.get(sha)
+                            if allele:
+                                allele.state = "dominant"
+                            seeded.append({"locus": locus, "sha": sha[:12], "source": "llm"})
+                    except Exception as e:
+                        seeded.append({"locus": locus, "sha": None, "source": "error", "error": str(e)})
+
+            # Register pathway alleles
+            pw_count = 0
+            for pw_name in contract_store.known_pathways():
+                pw_contract = contract_store.get_pathway(pw_name)
+                if pw_contract is None:
+                    continue
+                pathway = pathway_from_contract(pw_contract)
+                pr = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+                steps = steps_from_pathway(pathway)
+                sha = pr.register(pw_name, steps)
+                pw_allele = pr.get(sha)
+                if pw_allele and pw_allele.state != "dominant":
+                    pw_allele.state = "dominant"
+                phenotype.promote_pathway(pw_name, sha)
+                pr.save_index()
+                pw_count += 1
+
+            registry.save_index()
+            phenotype.save(root / "phenotype.toml")
+            _jobs[job_id] = {"status": "done", "type": "init", "success": True,
+                             "seeded": seeded, "pathways": pw_count}
+        except Exception as e:
+            _jobs[job_id] = {"status": "done", "type": "init", "success": False,
+                             "error": str(e)}
+
+    asyncio.get_event_loop().run_in_executor(None, _do_init)
+    return {"job_id": job_id, "status": "running"}
+
+
 @app.post("/api/run")
 async def api_run(request: Request):
-    """Run a pathway in background, return job ID for polling."""
+    """Run a pathway in background with optional iterations. Uses contract defaults."""
     data = await request.json()
     pathway_name = data.get("pathway")
-    input_json = json.dumps(data.get("input", {}))
     kernel_name = data.get("kernel", "data-mock")
+    iterations = data.get("iterations", 1)
+    input_override = data.get("input")
 
     if not pathway_name:
         return JSONResponse({"error": "pathway is required"}, status_code=400)
 
     job_id = _uuid.uuid4().hex[:12]
-    _jobs[job_id] = {"status": "running", "type": "run", "pathway": pathway_name}
+    _jobs[job_id] = {"status": "running", "type": "run", "pathway": pathway_name,
+                     "progress": 0, "total": iterations}
     _prune_jobs()
 
     def _do_run():
@@ -501,15 +754,14 @@ async def api_run(request: Request):
 
             contract_store = load_contract_store(root)
 
-            # Merge contract defaults with provided input
             defaults = {}
             pw_contract = contract_store.get_pathway(pathway_name)
             if pw_contract:
                 for f in pw_contract.takes:
                     if f.default is not None:
                         defaults[f.name] = f.default
-            provided = json.loads(input_json) if input_json else {}
-            defaults.update(provided)
+            if input_override and isinstance(input_override, dict):
+                defaults.update(input_override)
             final_input = json.dumps(defaults)
 
             registry = Registry.open(root / ".sg" / "registry")
@@ -530,20 +782,35 @@ async def api_run(request: Request):
                 meta_param_tracker=meta_tracker,
             )
 
-            outputs = orch.run_pathway(pathway_name, final_input)
+            all_runs = []
+            successes = 0
+            for iteration in range(iterations):
+                _jobs[job_id]["progress"] = iteration + 1
+                try:
+                    outputs = orch.run_pathway(pathway_name, final_input)
+                    steps = []
+                    run_ok = True
+                    for i, (out, sha) in enumerate(outputs):
+                        try:
+                            parsed = json.loads(out)
+                            if isinstance(parsed, dict) and not parsed.get("success", True):
+                                run_ok = False
+                        except Exception:
+                            parsed = out
+                        steps.append({"step": i + 1, "sha": sha[:12], "output": parsed})
+                    if run_ok:
+                        successes += 1
+                    all_runs.append({"iteration": iteration + 1, "success": run_ok, "steps": steps})
+                except Exception as e:
+                    all_runs.append({"iteration": iteration + 1, "success": False, "error": str(e)})
+
             orch.verify_scheduler.wait()
             orch.save_state()
 
-            steps = []
-            for i, (out, sha) in enumerate(outputs):
-                try:
-                    parsed = json.loads(out)
-                except Exception:
-                    parsed = out
-                steps.append({"step": i + 1, "sha": sha[:12], "output": parsed})
-
-            _jobs[job_id] = {"status": "done", "type": "run", "success": True,
-                             "pathway": pathway_name, "steps": steps}
+            _jobs[job_id] = {"status": "done", "type": "run", "success": successes > 0,
+                             "pathway": pathway_name, "iterations": iterations,
+                             "successes": successes, "failures": iterations - successes,
+                             "runs": all_runs[-1:] if iterations > 1 else all_runs}
         except Exception as e:
             _jobs[job_id] = {"status": "done", "type": "run", "success": False,
                              "error": str(e)}
@@ -631,10 +898,9 @@ async def api_generate(request: Request):
 
 @app.post("/api/compete")
 async def api_compete(request: Request):
-    """Run allele competition trials in background."""
+    """Run allele competition trials in background. Builds input from contract defaults."""
     data = await request.json()
     locus = data.get("locus")
-    input_json = json.dumps(data.get("input", {}))
     rounds = data.get("rounds", 10)
     kernel_name = data.get("kernel", "data-mock")
 
@@ -659,6 +925,21 @@ async def api_compete(request: Request):
             phenotype = PhenotypeMap.load(root / "phenotype.toml")
             kernel = load_kernel(kernel_name)
             mpt = MetaParamTracker.open(root / ".sg" / "meta_params.json")
+
+            # Build input from pathway contract defaults that use this locus
+            defaults = {}
+            for pw_name in contract_store.known_pathways():
+                pw = contract_store.get_pathway(pw_name)
+                if pw:
+                    for f in pw.takes:
+                        if f.default is not None and f.name not in defaults:
+                            defaults[f.name] = f.default
+            gene = contract_store.get_gene(locus)
+            if gene:
+                for f in gene.takes:
+                    if f.default is not None and f.name not in defaults:
+                        defaults[f.name] = f.default
+            input_json = json.dumps(defaults)
 
             alleles = registry.alleles_for_locus(locus)
             if not alleles:
@@ -734,17 +1015,327 @@ async def api_compete(request: Request):
     return {"job_id": job_id, "status": "running"}
 
 
+# ── Allele deletion endpoints ────────────────────────────────────────
+
+@app.delete("/api/allele/{sha}")
+def api_delete_allele(sha: str):
+    """Delete a single allele by SHA (prefix match supported)."""
+    root = _project_root
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+
+    full_sha = None
+    for s in registry.alleles:
+        if s == sha or s.startswith(sha):
+            full_sha = s
+            break
+    if full_sha is None:
+        return JSONResponse({"error": f"allele not found: {sha}"}, status_code=404)
+
+    meta = registry.get(full_sha)
+    locus = meta.locus if meta else "unknown"
+    registry.delete_allele(full_sha)
+    phenotype.remove_allele(locus, full_sha)
+    registry.save_index()
+    phenotype.save(root / "phenotype.toml")
+    return {"ok": True, "deleted": full_sha[:12], "locus": locus}
+
+
+@app.delete("/api/locus/{name}/alleles")
+def api_delete_locus_alleles(name: str):
+    """Delete all alleles for a specific locus."""
+    root = _project_root
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+
+    count = registry.delete_locus(name)
+    if count == 0:
+        return JSONResponse({"error": f"no alleles for locus: {name}"}, status_code=404)
+
+    phenotype.clear_locus(name)
+    registry.save_index()
+    phenotype.save(root / "phenotype.toml")
+    return {"ok": True, "locus": name, "deleted": count}
+
+
+@app.delete("/api/alleles")
+def api_delete_all_alleles():
+    """Delete all alleles from all loci — full genome reset."""
+    root = _project_root
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+
+    count = registry.delete_all()
+    phenotype.clear_all_loci()
+    registry.save_index()
+    phenotype.save(root / "phenotype.toml")
+    return {"ok": True, "deleted": count}
+
+
+@dataclasses.dataclass
+class DaemonState:
+    running: bool = False
+    paused: bool = False
+    tick_count: int = 0
+    tick_interval: float = 30.0
+    kernel: str = "data-mock"
+    mutation_engine: str = "deepseek"
+    auto_mutate: bool = True
+    auto_compete: bool = True
+    compete_every: int = 5
+    compete_rounds: int = 10
+    last_pathway: str = ""
+    last_tick_error: str = ""
+    _task: asyncio.Task | None = dataclasses.field(default=None, repr=False)
+
+    def to_dict(self):
+        return {
+            "running": self.running,
+            "paused": self.paused,
+            "tick_count": self.tick_count,
+            "tick_interval": self.tick_interval,
+            "kernel": self.kernel,
+            "mutation_engine": self.mutation_engine,
+            "auto_mutate": self.auto_mutate,
+            "auto_compete": self.auto_compete,
+            "compete_every": self.compete_every,
+            "compete_rounds": self.compete_rounds,
+            "last_pathway": self.last_pathway,
+            "last_tick_error": self.last_tick_error,
+        }
+
+_daemon = DaemonState()
+
+
+async def _daemon_loop():
+    """Autonomous evolutionary loop — runs as an asyncio task."""
+    root = _project_root
+    pathway_index = 0
+
+    while _daemon.running:
+        if _daemon.paused:
+            await asyncio.sleep(1)
+            continue
+
+        await asyncio.sleep(_daemon.tick_interval)
+        if not _daemon.running:
+            break
+
+        _daemon.tick_count += 1
+        tick = _daemon.tick_count
+        logger.info("daemon tick %d", tick)
+
+        try:
+            result = await asyncio.to_thread(_daemon_tick, root, pathway_index)
+            pathway_index = result.get("next_index", pathway_index + 1)
+            _daemon.last_pathway = result.get("pathway", "")
+            _daemon.last_tick_error = ""
+        except (SystemExit, BaseException) as e:
+            _daemon.last_tick_error = str(e)
+            logger.error("daemon tick %d failed: %s", tick, e, exc_info=True)
+
+    logger.info("daemon loop exited (tick_count=%d)", _daemon.tick_count)
+
+
+def _daemon_tick(root: Path, pathway_index: int) -> dict:
+    """Single daemon tick — runs in a thread. Returns state for next iteration."""
+    from sg.kernel.discovery import load_kernel
+    from sg.cli import load_contract_store, make_mutation_engine
+    from sg.orchestrator import Orchestrator
+    from sg.meta_params import MetaParamTracker
+    from sg.loader import load_gene, call_gene
+    from sg.contracts import validate_output
+    import argparse
+
+    contract_store = load_contract_store(root)
+    registry = Registry.open(root / ".sg" / "registry")
+    phenotype = PhenotypeMap.load(root / "phenotype.toml")
+    fusion_tracker = FusionTracker.open(root / "fusion_tracker.json")
+    kernel = load_kernel(_daemon.kernel)
+    pft = PathwayFitnessTracker.open(root / "pathway_fitness.json")
+    pr = PathwayRegistry.open(root / ".sg" / "pathway_registry")
+    meta_tracker = MetaParamTracker.open(root / ".sg" / "meta_params.json")
+
+    args_ns = argparse.Namespace(
+        mutation_engine=_daemon.mutation_engine,
+        model=None, kernel=_daemon.kernel,
+    )
+    mutation_engine = make_mutation_engine(args_ns, root, contract_store, kernel=kernel)
+
+    orch = Orchestrator(
+        registry=registry, phenotype=phenotype,
+        mutation_engine=mutation_engine, fusion_tracker=fusion_tracker,
+        kernel=kernel, contract_store=contract_store,
+        project_root=root,
+        pathway_fitness_tracker=pft, pathway_registry=pr,
+        meta_param_tracker=meta_tracker,
+    )
+
+    pathways = list(contract_store.known_pathways())
+    if not pathways:
+        orch.save_state()
+        return {"pathway": "", "next_index": 0}
+
+    idx = pathway_index % len(pathways)
+    pw_name = pathways[idx]
+
+    # Build input from contract defaults
+    defaults = {}
+    pw_contract = contract_store.get_pathway(pw_name)
+    if pw_contract:
+        for f in pw_contract.takes:
+            if f.default is not None:
+                defaults[f.name] = f.default
+    input_json = json.dumps(defaults)
+
+    # Phase 1: run the pathway
+    try:
+        outputs = orch.run_pathway(pw_name, input_json)
+        logger.info("daemon tick pathway '%s': %d steps ok", pw_name, len(outputs))
+    except Exception as e:
+        logger.warning("daemon tick pathway '%s' failed: %s", pw_name, e)
+
+    # Phase 2: auto-mutate — for any locus with 3+ consecutive failures, generate a variant
+    if _daemon.auto_mutate:
+        for locus in contract_store.known_loci():
+            dom_sha = phenotype.get_dominant(locus)
+            if not dom_sha:
+                continue
+            allele = registry.get(dom_sha)
+            if allele and allele.consecutive_failures >= 3:
+                gene = contract_store.get_gene(locus)
+                if gene is None:
+                    continue
+                try:
+                    if hasattr(mutation_engine, '_contract_prompt'):
+                        prompt = mutation_engine._contract_prompt(locus)
+                    else:
+                        prompt = f"Locus: {locus}\nDescription: {gene.does}"
+                    sources = mutation_engine.generate(locus, prompt, count=1)
+                    for src in sources:
+                        sha = registry.register(src, locus, generation=allele.generation + 1,
+                                                parent_sha=dom_sha)
+                        new_allele = registry.get(sha)
+                        if new_allele:
+                            new_allele.state = "recessive"
+                        phenotype.add_to_fallback(locus, sha)
+                    logger.info("daemon auto-mutated %s (failures=%d)", locus, allele.consecutive_failures)
+                except Exception as e:
+                    logger.warning("daemon auto-mutate %s failed: %s", locus, e)
+
+    # Phase 3: auto-compete — every N ticks, run competition for all loci
+    if _daemon.auto_compete and _daemon.tick_count % _daemon.compete_every == 0:
+        for locus in contract_store.known_loci():
+            alleles = registry.alleles_for_locus(locus)
+            if len(alleles) < 2:
+                continue
+
+            locus_defaults = {}
+            gene = contract_store.get_gene(locus)
+            if gene:
+                for f in gene.takes:
+                    if f.default is not None:
+                        locus_defaults[f.name] = f.default
+            locus_defaults.update(defaults)
+            comp_input = json.dumps(locus_defaults)
+
+            best_sha = None
+            best_fitness = -1.0
+            for a in alleles:
+                source = registry.load_source(a.sha256)
+                if source is None:
+                    continue
+                for _ in range(_daemon.compete_rounds):
+                    try:
+                        fn = load_gene(source, kernel)
+                        result = call_gene(fn, comp_input)
+                        if validate_output(locus, result, contract_store):
+                            arena.record_success(a)
+                        else:
+                            arena.record_failure(a)
+                    except Exception:
+                        arena.record_failure(a)
+                fitness = arena.compute_fitness(a, params=meta_tracker.get_params(locus))
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_sha = a.sha256
+
+            dom_sha = phenotype.get_dominant(locus)
+            if best_sha and dom_sha and best_sha != dom_sha:
+                dom_allele = registry.get(dom_sha)
+                dom_fitness = arena.compute_fitness(dom_allele, params=meta_tracker.get_params(locus)) if dom_allele else 0.0
+                if best_fitness > dom_fitness + 0.05:
+                    phenotype.promote(locus, best_sha)
+                    winner = registry.get(best_sha)
+                    if winner:
+                        winner.state = "dominant"
+                    if dom_allele:
+                        dom_allele.state = "recessive"
+                    logger.info("daemon promoted %s for %s (fitness %.3f > %.3f)",
+                                best_sha[:12], locus, best_fitness, dom_fitness)
+
+    orch.verify_scheduler.wait()
+    orch.save_state()
+    return {"pathway": pw_name, "next_index": idx + 1}
+
+
 @app.get("/api/daemon/status")
 def api_daemon_status():
-    """Return daemon state."""
-    return {
-        "running": _daemon_ref is not None and _daemon_ref.get("running", False),
-        "tick_count": _daemon_ref.get("tick_count", 0) if _daemon_ref else 0,
-        "kernel": _daemon_ref.get("kernel", "") if _daemon_ref else "",
-        "mutation_engine": _daemon_ref.get("mutation_engine", "") if _daemon_ref else "",
-    }
+    return _daemon.to_dict()
 
-_daemon_ref: dict | None = None
+
+@app.post("/api/daemon/start")
+async def api_daemon_start(request: Request):
+    data = await request.json()
+    if _daemon.running:
+        return {"ok": False, "error": "daemon already running"}
+
+    _daemon.kernel = data.get("kernel", _daemon.kernel)
+    _daemon.mutation_engine = data.get("mutation_engine", _daemon.mutation_engine)
+    _daemon.tick_interval = data.get("tick_interval", _daemon.tick_interval)
+    _daemon.auto_mutate = data.get("auto_mutate", _daemon.auto_mutate)
+    _daemon.auto_compete = data.get("auto_compete", _daemon.auto_compete)
+    _daemon.compete_every = data.get("compete_every", _daemon.compete_every)
+    _daemon.compete_rounds = data.get("compete_rounds", _daemon.compete_rounds)
+    _daemon.running = True
+    _daemon.paused = False
+    _daemon.tick_count = 0
+    _daemon.last_tick_error = ""
+    _daemon._task = asyncio.create_task(_daemon_loop())
+    logger.info("daemon started (interval=%.1fs, kernel=%s, engine=%s)",
+                _daemon.tick_interval, _daemon.kernel, _daemon.mutation_engine)
+    return {"ok": True}
+
+
+@app.post("/api/daemon/stop")
+async def api_daemon_stop():
+    if not _daemon.running:
+        return {"ok": False, "error": "daemon not running"}
+    _daemon.running = False
+    if _daemon._task:
+        _daemon._task.cancel()
+        _daemon._task = None
+    logger.info("daemon stopped at tick %d", _daemon.tick_count)
+    return {"ok": True, "tick_count": _daemon.tick_count}
+
+
+@app.post("/api/daemon/pause")
+async def api_daemon_pause():
+    if not _daemon.running:
+        return {"ok": False, "error": "daemon not running"}
+    _daemon.paused = not _daemon.paused
+    logger.info("daemon %s at tick %d", "paused" if _daemon.paused else "resumed", _daemon.tick_count)
+    return {"ok": True, "paused": _daemon.paused}
+
+
+@app.post("/api/daemon/configure")
+async def api_daemon_configure(request: Request):
+    data = await request.json()
+    for key in ("tick_interval", "auto_mutate", "auto_compete", "compete_every",
+                "compete_rounds", "kernel", "mutation_engine"):
+        if key in data:
+            setattr(_daemon, key, data[key])
+    return {"ok": True, **_daemon.to_dict()}
 
 
 # Federation endpoints (used by sg share/pull)
@@ -838,23 +1429,33 @@ body.detail-open { grid-template-columns:220px 1fr 300px; }
   background:var(--bg-card); border:1px solid var(--border); color:var(--text);
   padding:5px 8px; }
 #command-bar select { min-width:140px; }
-#command-bar input.json-input { flex:1; min-width:200px; max-width:400px; }
+#command-bar input.cmd-count { width:50px; }
 #command-bar .sep { width:1px; height:24px; background:var(--border); }
 #command-bar button {
   padding:5px 14px; cursor:pointer; border:1px solid var(--border);
   font-weight:bold; transition:all 0.15s; }
+#command-bar .btn-init { background:#a0f1; color:#c0a0ff; border-color:#c0a0ff; }
+#command-bar .btn-init:hover { background:#a0f3; }
 #command-bar .btn-run { background:#0f03; color:var(--success); border-color:var(--success); }
 #command-bar .btn-run:hover { background:#0f06; }
 #command-bar .btn-gen { background:#0ff1; color:var(--accent); border-color:var(--accent); }
 #command-bar .btn-gen:hover { background:#0ff3; }
 #command-bar .btn-compete { background:#f801; color:var(--warning); border-color:var(--warning); }
 #command-bar .btn-compete:hover { background:#f803; }
-#command-bar .daemon-status { margin-left:auto; font-size:10px; color:var(--text-dim);
-  display:flex; align-items:center; gap:6px; }
-#command-bar .daemon-dot { width:8px; height:8px; border-radius:50%; }
-#command-bar .daemon-dot.on { background:var(--success); box-shadow:0 0 6px var(--success); }
-#command-bar .daemon-dot.off { background:var(--danger); }
 #command-bar label { color:var(--text-dim); font-size:10px; text-transform:uppercase; }
+#command-bar .daemon-controls { display:flex; align-items:center; gap:8px; margin-left:auto; }
+#command-bar .daemon-indicator { display:flex; align-items:center; gap:5px; font-size:10px; color:var(--text-dim); }
+#command-bar .daemon-dot { width:8px; height:8px; border-radius:50%; background:var(--danger); flex-shrink:0; }
+#command-bar .daemon-dot.on { background:var(--success); box-shadow:0 0 6px var(--success); }
+#command-bar .daemon-dot.paused { background:var(--warning); box-shadow:0 0 4px var(--warning); }
+#command-bar .daemon-tick { color:var(--accent); font-variant-numeric:tabular-nums; }
+#command-bar .daemon-btns { display:flex; gap:4px; }
+#command-bar .btn-daemon-start { background:#0f03; color:var(--success); border-color:var(--success); }
+#command-bar .btn-daemon-start:hover { background:#0f06; }
+#command-bar .btn-daemon-start.running { background:#f003; color:var(--danger); border-color:var(--danger); }
+#command-bar .btn-daemon-start.running:hover { background:#f006; }
+#command-bar .btn-daemon-pause { background:#ff01; color:var(--warning); border-color:var(--warning); }
+#command-bar .btn-daemon-pause:hover { background:#ff03; }
 .cmd-group { display:flex; align-items:center; gap:6px; }
 .cmd-count { width:40px; text-align:center; }
 
@@ -957,6 +1558,12 @@ marker { fill:var(--text-dim); }
 .allele-card.deprecated { border-left:3px solid var(--danger); }
 .allele-card .sha { font-size:11px; color:var(--accent2); cursor:pointer; }
 .allele-card .meta { font-size:10px; color:var(--text-dim); margin-top:4px; }
+.btn-del { background:none; color:var(--danger); border:1px solid var(--danger); border-radius:3px;
+  cursor:pointer; font-family:inherit; font-size:11px; padding:4px 12px; opacity:0.7; }
+.btn-del:hover { opacity:1; background:rgba(255,60,60,0.15); }
+.btn-del-sm { background:none; border:none; color:var(--danger); cursor:pointer; font-size:14px;
+  line-height:1; padding:0 2px; opacity:0.4; font-family:inherit; }
+.btn-del-sm:hover { opacity:1; }
 .allele-connector { width:2px; height:12px; background:var(--border); margin-left:20px; }
 .btn-compete { background:var(--recessive); color:#fff; border:none; border-radius:3px; cursor:pointer;
   font-size:11px; padding:4px 12px; }
@@ -1036,9 +1643,32 @@ body.detail-open #detail { display:block; }
 .heatmap svg text { fill:var(--text); font-size:10px; font-family:inherit; }
 
 /* ── Contract Editor ── */
+#command-bar .btn-new-pw { background:#0af1; color:#40c0ff; border-color:#40c0ff; }
+#command-bar .btn-new-pw:hover { background:#0af3; }
+.intent-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75); z-index:299; }
+.intent-overlay.open { display:block; }
+.intent-dialog { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+  background:var(--bg-deep); border:1px solid var(--accent); border-radius:8px;
+  width:500px; z-index:300; box-shadow:0 8px 30px rgba(0,0,0,0.6); }
+.intent-dialog.open { display:block; }
+.intent-header { padding:12px 16px; border-bottom:1px solid var(--border); color:var(--accent);
+  font-weight:bold; font-size:13px; }
+.intent-body { padding:16px; }
+.intent-label { display:block; color:var(--text-dim); font-size:11px; margin-bottom:8px; }
+.intent-input { width:100%; background:var(--bg-card); border:1px solid var(--border); color:var(--text);
+  padding:10px; font-family:inherit; font-size:12px; border-radius:4px; resize:vertical; }
+.intent-input:focus { border-color:var(--accent); outline:none; }
+.intent-status { font-size:11px; margin-top:8px; min-height:16px; }
+.intent-footer { padding:12px 16px; border-top:1px solid var(--border); display:flex; gap:8px;
+  justify-content:flex-end; }
+.intent-footer button { padding:6px 16px; font-family:inherit; font-size:11px; border-radius:4px;
+  cursor:pointer; }
+.ce-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75);
+  z-index:109; }
+.ce-overlay.open { display:block; }
 .ce-modal { display:none; position:fixed; top:2%; left:5%; width:90%; height:94%;
-  background:var(--bg-main); border:1px solid var(--accent); border-radius:6px;
-  z-index:110; display:none; flex-direction:column; }
+  background:var(--bg-deep); border:1px solid var(--accent); border-radius:6px;
+  z-index:110; flex-direction:column; box-shadow:0 8px 40px rgba(0,0,0,0.6); }
 .ce-modal.open { display:flex; }
 .ce-bar { display:flex; align-items:center; gap:12px; padding:8px 16px;
   border-bottom:1px solid var(--border); background:var(--bg-panel); border-radius:6px 6px 0 0; }
@@ -1087,8 +1717,8 @@ body.detail-open #detail { display:block; }
 /* Prose textarea */
 .ce-prose { background:none; border:none; border-bottom:1px solid #ffffff18;
   color:var(--text); font-family:inherit; font-size:inherit; line-height:inherit;
-  padding:0 2px; outline:none; width:100%; resize:vertical; min-height:2.4em;
-  transition:border-color 0.15s; }
+  padding:0 2px; outline:none; width:100%; resize:none; overflow-y:hidden;
+  min-height:1.8em; transition:border-color 0.15s; white-space:pre-wrap; }
 .ce-prose:hover { border-bottom-color:#ffffff30; background:rgba(255,255,255,0.02); }
 .ce-prose:focus { border-bottom-color:var(--accent); background:rgba(100,180,255,0.03); }
 
@@ -1118,36 +1748,57 @@ body.detail-open #detail { display:block; }
     <select id="cmd-kernel"></select>
   </div>
   <div class="cmd-group">
+    <label>Engine</label>
+    <select id="cmd-engine">
+      <option value="deepseek">deepseek</option>
+      <option value="claude">claude</option>
+      <option value="openai">openai</option>
+    </select>
+  </div>
+  <div class="sep"></div>
+  <button class="btn-init" onclick="cmdInit()" title="Seed all loci from contracts via LLM">Init Genome</button>
+  <button class="btn-del" onclick="resetGenome()" title="Delete all alleles from all loci" style="font-size:11px;padding:4px 10px">Reset</button>
+  <button class="btn-new-pw" onclick="openNewPathwayDialog()" title="Create a pathway from natural language intent">+ Pathway</button>
+  <div class="sep"></div>
+  <div class="cmd-group">
     <label>Pathway</label>
-    <select id="cmd-pathway" onchange="onPathwaySelect()"></select>
+    <select id="cmd-pathway"></select>
   </div>
   <div class="cmd-group">
-    <label>Input</label>
-    <input id="cmd-input" class="json-input" type="text" placeholder='{"key": "value"}' value="{}">
+    <label>Iterations</label>
+    <input id="cmd-iterations" class="cmd-count" type="number" value="1" min="1" max="100">
   </div>
-  <button class="btn-run" onclick="cmdRun()" title="Run pathway">Run</button>
+  <button class="btn-run" onclick="cmdRun()" title="Run pathway using contract defaults">Run</button>
   <div class="sep"></div>
   <div class="cmd-group">
     <label>Locus</label>
     <select id="cmd-locus"></select>
   </div>
   <div class="cmd-group">
-    <label>Engine</label>
-    <select id="cmd-engine">
-      <option value="mock">mock</option>
-      <option value="deepseek">deepseek</option>
-      <option value="claude">claude</option>
-      <option value="openai">openai</option>
-    </select>
-  </div>
-  <div class="cmd-group">
+    <label>Variants</label>
     <input id="cmd-count" class="cmd-count" type="number" value="1" min="1" max="10">
   </div>
-  <button class="btn-gen" onclick="cmdGenerate()" title="Generate competing alleles">Generate</button>
+  <button class="btn-gen" onclick="cmdGenerate()" title="Generate competing alleles from contract">Generate</button>
+  <div class="cmd-group">
+    <label>Rounds</label>
+    <input id="cmd-rounds" class="cmd-count" type="number" value="10" min="1" max="100">
+  </div>
   <button class="btn-compete" onclick="cmdCompete()" title="Run competition trials">Compete</button>
-  <div class="daemon-status">
-    <span class="daemon-dot off" id="daemon-dot"></span>
-    <span id="daemon-label">daemon stopped</span>
+  <div class="sep"></div>
+  <div class="daemon-controls">
+    <div class="daemon-indicator">
+      <span class="daemon-dot" id="daemon-dot"></span>
+      <span id="daemon-label">stopped</span>
+      <span id="daemon-tick" class="daemon-tick"></span>
+    </div>
+    <div class="daemon-btns">
+      <button class="btn-daemon-start" id="btn-daemon-toggle" onclick="daemonToggle()" title="Start/stop the evolutionary daemon">Start</button>
+      <button class="btn-daemon-pause" id="btn-daemon-pause" onclick="daemonPause()" title="Pause/resume" disabled>Pause</button>
+    </div>
+    <div class="cmd-group">
+      <label>Tick (s)</label>
+      <input id="daemon-interval" class="cmd-count" type="number" value="30" min="5" max="600" step="5">
+    </div>
   </div>
 </div>
 
@@ -1235,6 +1886,21 @@ body.detail-open #detail { display:block; }
 </div>
 
 <!-- Contract Editor Modal -->
+<div class="intent-overlay" id="intent-overlay" onclick="closeNewPathwayDialog()"></div>
+<div class="intent-dialog" id="intent-dialog">
+  <div class="intent-header">New Pathway</div>
+  <div class="intent-body">
+    <label class="intent-label">Describe what the pathway should do:</label>
+    <textarea id="intent-text" class="intent-input" rows="3" placeholder="e.g. Ingest CSV data, validate the schema, clean null values, then verify data quality"></textarea>
+    <div class="intent-status" id="intent-status"></div>
+  </div>
+  <div class="intent-footer">
+    <button class="btn-gen" onclick="submitNewPathway()">Generate</button>
+    <button class="btn-close" onclick="closeNewPathwayDialog()">Cancel</button>
+  </div>
+</div>
+
+<div class="ce-overlay" id="ce-overlay" onclick="ceEditorClose()"></div>
 <div class="ce-modal" id="contract-editor">
   <div class="ce-bar">
     <span class="ce-title" id="ce-title">Contract Editor</span>
@@ -1283,7 +1949,13 @@ async function refreshData() {
 function connectSSE() {
   try {
     const es = new EventSource('/api/events');
-    es.onmessage = () => refreshData();
+    es.onmessage = (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        if(d.type === 'daemon_tick') { updateDaemonUI(); }
+      } catch(e) {}
+      refreshData();
+    };
     es.onerror = () => { es.close(); setTimeout(connectSSE, 10000); };
   } catch(e) { setInterval(refreshData, 5000); }
 }
@@ -1732,6 +2404,8 @@ async function renderAlleleStack() {
         onclick="competeLocus('${sel.name}')">Compete (${alleles.length} alleles)</button>` : ''}
       <button class="btn-gen" style="font-size:11px;padding:4px 12px"
         onclick="generateForLocus('${sel.name}')">+ Generate</button>
+      <button class="btn-del" style="font-size:11px;padding:4px 12px"
+        onclick="clearLocusAlleles('${sel.name}')">Clear All</button>
     </div>
     <div class="allele-stack">
     ${alleles.map((a,i) => `
@@ -1739,7 +2413,10 @@ async function renderAlleleStack() {
       <div class="allele-card ${a.state}">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <span class="sha" onclick="showSource('${a.sha}')">${a.sha}</span>
-          <span style="font-size:10px;color:${a.is_dominant?'var(--success)':a.state==='recessive'?'var(--recessive)':'var(--danger)'}">${a.state}</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:10px;color:${a.is_dominant?'var(--success)':a.state==='recessive'?'var(--recessive)':'var(--danger)'}">${a.state}</span>
+            <button class="btn-del-sm" onclick="deleteAllele('${a.sha}','${sel.name}')" title="Delete this allele">&times;</button>
+          </div>
         </div>
         <div class="meta">
           gen ${a.generation} | fitness ${a.fitness.toFixed(3)} |
@@ -2140,11 +2817,13 @@ async function ceEditorOpen(name) {
   document.getElementById('ce-title').textContent = resp.parsed.type + ' : ' + name;
   document.getElementById('ce-status').textContent = '';
   ceRender(resp.parsed);
+  document.getElementById('ce-overlay').classList.add('open');
   document.getElementById('contract-editor').classList.add('open');
 }
 
 function ceEditorClose() {
   document.getElementById('contract-editor').classList.remove('open');
+  document.getElementById('ce-overlay').classList.remove('open');
   _ceData = null;
 }
 
@@ -2157,7 +2836,7 @@ function ceRender(p) {
     html = ceRenderPathway(p);
   }
   body.innerHTML = html;
-  ceAutosize();
+  requestAnimationFrame(ceAutosize);
 }
 
 function _esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
@@ -2179,7 +2858,7 @@ function ceRenderGene(p) {
   h += '<div class="ce-line"></div>';
   // does
   h += `<div class="ce-line">  <span class="ce-verb">does:</span></div>`;
-  h += `<div class="ce-line">    <textarea class="ce-prose" data-field="does" rows="${Math.max(2,(p.does||'').split('\\n').length)}">${_esc(p.does||'')}</textarea></div>`;
+  h += `<div class="ce-line">    <textarea class="ce-prose" data-field="does" oninput="ceAutosize()">${_esc(p.does||'')}</textarea></div>`;
   h += '<div class="ce-line"></div>';
   // takes
   if(p.takes && p.takes.length > 0) {
@@ -2281,7 +2960,7 @@ function ceRenderPathway(p) {
   h += `<div class="ce-line">  <span class="ce-kw">risk</span> ${_sel('ce-risk','risk',p.risk,['none','low','medium','high','critical'])}</div>`;
   h += '<div class="ce-line"></div>';
   h += `<div class="ce-line">  <span class="ce-verb">does:</span></div>`;
-  h += `<div class="ce-line">    <textarea class="ce-prose" data-field="does" rows="${Math.max(2,(p.does||'').split('\\n').length)}">${_esc(p.does||'')}</textarea></div>`;
+  h += `<div class="ce-line">    <textarea class="ce-prose" data-field="does" oninput="ceAutosize()">${_esc(p.does||'')}</textarea></div>`;
   h += '<div class="ce-line"></div>';
   // takes with defaults
   if(p.takes && p.takes.length > 0) {
@@ -2302,17 +2981,23 @@ function ceRenderPathway(p) {
     h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddField('takes')">+ field</span></div>`;
     h += '<div class="ce-line"></div>';
   }
-  // steps (read-only structure, editable locus names and params)
   if(p.steps && p.steps.length > 0) {
     h += `<div class="ce-line">  <span class="ce-verb">steps:</span></div>`;
     p.steps.forEach((s,i) => {
-      h += `<div class="ce-line">    <span class="ce-idx">${s.index}.</span> ${_inp('ce-name','steps.'+i+'.locus',s.locus,'style="width:'+Math.max(100,s.locus.length*8)+'px"')}</div>`;
+      h += `<div class="ce-line">    <span class="ce-idx">${s.index}.</span> ${_inp('ce-name','steps.'+i+'.locus',s.locus,'style="width:'+Math.max(100,s.locus.length*8)+'px"')}`;
+      h += `<span class="ce-remove-btn" onclick="ceRemoveStep(${i})">&#x2715;</span></div>`;
       if(s.params) {
         Object.entries(s.params).forEach(([k,v]) => {
           h += `<div class="ce-line">         ${_inp('ce-value','steps.'+i+'.params.'+k+'._key',k,'style="width:'+Math.max(60,k.length*8)+'px"')} <span class="ce-punct">=</span> ${_inp('ce-value','steps.'+i+'.params.'+k+'._val',v,'style="width:'+Math.max(60,v.length*8)+'px"')}</div>`;
         });
       }
+      h += `<div class="ce-line">         <span class="ce-add-btn" onclick="ceAddStepParam(${i})">+ param</span></div>`;
     });
+    h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddStep()">+ step</span></div>`;
+    h += '<div class="ce-line"></div>';
+  } else {
+    h += `<div class="ce-line">  <span class="ce-verb">steps:</span></div>`;
+    h += `<div class="ce-line">    <span class="ce-add-btn" onclick="ceAddStep()">+ step</span></div>`;
     h += '<div class="ce-line"></div>';
   }
   // on failure
@@ -2341,7 +3026,7 @@ function ceRenderBulletSection(p, field, label) {
 function ceAutosize() {
   document.querySelectorAll('.ce-prose').forEach(ta => {
     ta.style.height = 'auto';
-    ta.style.height = ta.scrollHeight + 'px';
+    ta.style.height = Math.max(ta.scrollHeight, 20) + 'px';
   });
 }
 
@@ -2361,9 +3046,20 @@ function ceCollectParsed() {
       const i = parseInt(idx);
       if(p[sec][i] !== undefined) p[sec][i][key] = val;
     } else if(parts.length === 5 && parts[3] === '_key') {
-      // skip — handled by _val
+      // step param key rename: steps.0.params.old_key._key = new_key
+      const [sec, idx, , oldKey] = [parts[0], parseInt(parts[1]), parts[2], parts[4]];
+      // handled together with _val
     } else if(parts.length === 5 && parts[3] === '_val') {
-      // NOT IMPLEMENTED
+      // step param value: steps.0.params.param_name._val = value
+      const sec = parts[0], idx = parseInt(parts[1]), paramKey = parts[2];
+      if(p[sec] && p[sec][idx] && p[sec][idx].params) {
+        const keyEl = document.querySelector(`[data-field="${sec}.${idx}.params.${paramKey}._key"]`);
+        const newKey = keyEl ? keyEl.value : paramKey;
+        if(newKey !== paramKey) {
+          delete p[sec][idx].params[paramKey];
+        }
+        p[sec][idx].params[newKey] = val;
+      }
     }
   });
   return p;
@@ -2518,6 +3214,35 @@ function ceAddSection(section) {
   ceRender(p);
 }
 
+function ceAddStep() {
+  const p = ceCollectParsed();
+  if(!p.steps) p.steps = [];
+  const idx = p.steps.length + 1;
+  p.steps.push({index: idx, locus: 'gene_name', params: {}});
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+function ceRemoveStep(idx) {
+  const p = ceCollectParsed();
+  if(p.steps) {
+    p.steps.splice(idx, 1);
+    p.steps.forEach((s, i) => { s.index = i + 1; });
+  }
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
+function ceAddStepParam(stepIdx) {
+  const p = ceCollectParsed();
+  if(p.steps && p.steps[stepIdx]) {
+    if(!p.steps[stepIdx].params) p.steps[stepIdx].params = {};
+    p.steps[stepIdx].params['param'] = '{value}';
+  }
+  _ceData.parsed = p;
+  ceRender(p);
+}
+
 function ceAddDefault(idx) {
   const p = ceCollectParsed();
   if(p.takes && p.takes[idx]) { p.takes[idx].default = ''; }
@@ -2600,21 +3325,16 @@ async function initCommandBar() {
 }
 
 function updateCommandBarSelectors() {
-  // Populate pathways
   const pwSel = document.getElementById('cmd-pathway');
   const curPw = pwSel.value;
   pwSel.innerHTML = '';
   state.pathways.forEach(p => {
     const opt = document.createElement('option');
     opt.value = p.name; opt.textContent = p.name;
-    if(p.defaults && Object.keys(p.defaults).length > 0) {
-      opt.dataset.defaults = JSON.stringify(p.defaults);
-    }
     if(p.name === curPw) opt.selected = true;
     pwSel.appendChild(opt);
   });
 
-  // Populate loci
   const locusSel = document.getElementById('cmd-locus');
   const curLocus = locusSel.value;
   locusSel.innerHTML = '';
@@ -2641,12 +3361,27 @@ async function pollJob(jobId, title) {
     const data = await fetchJSON('/api/job/' + jobId);
     if(!data) { showToast(title + ' Error', 'Lost connection', true); return; }
     if(data.status === 'running') {
+      const prog = data.progress ? ' (' + data.progress + '/' + data.total + ')' : '';
+      document.getElementById('toast-title').textContent = title + prog;
       setTimeout(poll, 500);
       return;
     }
     if(data.success) {
-      let msg = data;
-      if(data.type === 'compete' && data.results) {
+      let msg = JSON.stringify(data);
+      if(data.type === 'init' && data.seeded) {
+        const lines = data.seeded.map(s =>
+          s.locus + ' -> ' + (s.sha || 'FAILED') + ' (' + s.source + ')' + (s.error ? ' ' + s.error : '')
+        );
+        lines.push('Pathways: ' + data.pathways);
+        msg = lines.join('\\n');
+      } else if(data.type === 'run') {
+        if(data.iterations > 1) {
+          msg = data.pathway + ': ' + data.successes + '/' + data.iterations + ' succeeded';
+        } else if(data.runs && data.runs[0]) {
+          const steps = data.runs[0].steps || [];
+          msg = steps.map(s => 'Step ' + s.step + ' [' + s.sha + ']: ' + JSON.stringify(s.output).substring(0,100)).join('\\n');
+        }
+      } else if(data.type === 'compete' && data.results) {
         const lines = data.results.map(r => {
           let line = r.sha + ' [' + r.state + '] ' + r.passed + '/' + r.total + ' fitness=' + r.fitness;
           if(r.passed === 0 && r.last_error) line += '\\n  error: ' + r.last_error;
@@ -2654,42 +3389,47 @@ async function pollJob(jobId, title) {
         });
         if(data.promoted) lines.push('PROMOTED: ' + data.promoted + ' is the new dominant');
         msg = lines.join('\\n');
+      } else if(data.type === 'generate' && data.registered) {
+        msg = 'Registered: ' + data.registered.join(', ');
       }
       showToast(title, msg, false);
     }
-    else { showToast(title + ' Failed', data.error || data, true); }
+    else { showToast(title + ' Failed', data.error || JSON.stringify(data), true); }
     refreshData();
   };
   poll();
 }
 
-function onPathwaySelect() {
-  const sel = document.getElementById('cmd-pathway');
-  const name = sel.value;
-  if(!name) return;
-  const opt = sel.options[sel.selectedIndex];
-  const defaults = opt.dataset.defaults;
-  if(defaults) {
-    document.getElementById('cmd-input').value = defaults;
-  }
+async function cmdInit() {
+  const kernel = document.getElementById('cmd-kernel').value;
+  const engine = document.getElementById('cmd-engine').value;
+  showToast('Initializing genome...', 'Seeding all loci from contracts via ' + engine, false);
+  try {
+    const resp = await fetch('/api/init', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({kernel, mutation_engine: engine}),
+    });
+    const data = await resp.json();
+    if(data.error) { showToast('Init Failed', data.error, true); }
+    else { pollJob(data.job_id, 'Init Genome'); }
+  } catch(e) { showToast('Init Error', e.message, true); }
 }
 
 async function cmdRun() {
   const pathway = document.getElementById('cmd-pathway').value;
   const kernel = document.getElementById('cmd-kernel').value;
-  let input;
-  try { input = JSON.parse(document.getElementById('cmd-input').value || '{}'); }
-  catch(e) { showToast('Input Error', 'Invalid JSON: ' + e.message, true); return; }
+  const iterations = parseInt(document.getElementById('cmd-iterations').value) || 1;
+  if(!pathway) { showToast('Error', 'Select a pathway', true); return; }
 
-  showToast('Running...', pathway + ' with ' + kernel, false);
+  showToast('Running...', pathway + ' x' + iterations + ' with ' + kernel, false);
   try {
     const resp = await fetch('/api/run', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({pathway, kernel, input}),
+      body: JSON.stringify({pathway, kernel, iterations}),
     });
     const data = await resp.json();
     if(data.error) { showToast('Run Failed', data.error, true); }
-    else { pollJob(data.job_id, 'Run: ' + pathway); }
+    else { pollJob(data.job_id, 'Run: ' + pathway + ' x' + iterations); }
   } catch(e) { showToast('Run Error', e.message, true); }
 }
 
@@ -2698,6 +3438,7 @@ async function cmdGenerate() {
   const kernel = document.getElementById('cmd-kernel').value;
   const engine = document.getElementById('cmd-engine').value;
   const count = parseInt(document.getElementById('cmd-count').value) || 1;
+  if(!locus) { showToast('Error', 'Select a locus', true); return; }
 
   showToast('Generating...', count + ' variant(s) for ' + locus + ' via ' + engine, false);
   try {
@@ -2707,23 +3448,21 @@ async function cmdGenerate() {
     });
     const data = await resp.json();
     if(data.error) { showToast('Generate Failed', data.error, true); }
-    else { pollJob(data.job_id, 'Generated: ' + locus); }
+    else { pollJob(data.job_id, 'Generate: ' + locus); }
   } catch(e) { showToast('Generate Error', e.message, true); }
 }
 
 async function cmdCompete() {
   const locus = document.getElementById('cmd-locus').value;
   const kernel = document.getElementById('cmd-kernel').value;
-  let input;
-  try { input = JSON.parse(document.getElementById('cmd-input').value || '{}'); }
-  catch(e) { showToast('Input Error', 'Invalid JSON: ' + e.message, true); return; }
+  const rounds = parseInt(document.getElementById('cmd-rounds').value) || 10;
+  if(!locus) { showToast('Error', 'Select a locus', true); return; }
 
-  const rounds = parseInt(document.getElementById('cmd-count').value) || 10;
-  showToast('Competing...', locus + ' (' + rounds + ' rounds)', false);
+  showToast('Competing...', locus + ' x' + rounds + ' rounds', false);
   try {
     const resp = await fetch('/api/compete', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({locus, kernel, input, rounds}),
+      body: JSON.stringify({locus, kernel, rounds}),
     });
     const data = await resp.json();
     if(data.error) { showToast('Compete Failed', data.error, true); }
@@ -2733,16 +3472,12 @@ async function cmdCompete() {
 
 async function competeLocus(locus) {
   const kernel = document.getElementById('cmd-kernel').value || 'data-mock';
-  let input;
-  try { input = JSON.parse(document.getElementById('cmd-input').value || '{}'); }
-  catch(e) { input = {}; }
-
-  const rounds = 10;
+  const rounds = parseInt(document.getElementById('cmd-rounds')?.value) || 10;
   showToast('Competing...', locus + ' (' + rounds + ' rounds, all alleles)', false);
   try {
     const resp = await fetch('/api/compete', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({locus, kernel, input, rounds}),
+      body: JSON.stringify({locus, kernel, rounds}),
     });
     const data = await resp.json();
     if(data.error) { showToast('Compete Failed', data.error, true); }
@@ -2752,7 +3487,7 @@ async function competeLocus(locus) {
 
 async function generateForLocus(locus) {
   const kernel = document.getElementById('cmd-kernel').value || 'data-mock';
-  const engine = document.getElementById('cmd-engine').value || 'mock';
+  const engine = document.getElementById('cmd-engine').value || 'deepseek';
   showToast('Generating...', '1 variant for ' + locus + ' via ' + engine, false);
   try {
     const resp = await fetch('/api/generate', {
@@ -2761,30 +3496,163 @@ async function generateForLocus(locus) {
     });
     const data = await resp.json();
     if(data.error) { showToast('Generate Failed', data.error, true); }
-    else { pollJob(data.job_id, 'Generated: ' + locus); }
+    else { pollJob(data.job_id, 'Generate: ' + locus); }
   } catch(e) { showToast('Generate Error', e.message, true); }
 }
 
-async function updateDaemonStatus() {
+function openNewPathwayDialog() {
+  document.getElementById('intent-text').value = '';
+  document.getElementById('intent-status').textContent = '';
+  document.getElementById('intent-overlay').classList.add('open');
+  document.getElementById('intent-dialog').classList.add('open');
+  document.getElementById('intent-text').focus();
+}
+
+function closeNewPathwayDialog() {
+  document.getElementById('intent-overlay').classList.remove('open');
+  document.getElementById('intent-dialog').classList.remove('open');
+}
+
+async function submitNewPathway() {
+  const intent = document.getElementById('intent-text').value.trim();
+  if(!intent) return;
+  const engine = document.getElementById('cmd-engine').value;
+  const kernel = document.getElementById('cmd-kernel').value;
+  const statusEl = document.getElementById('intent-status');
+  statusEl.textContent = 'Generating pathway via ' + engine + '...';
+  statusEl.style.color = 'var(--accent)';
+
+  try {
+    const resp = await fetch('/api/pathway/draft', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({intent, mutation_engine: engine, kernel}),
+    });
+    const data = await resp.json();
+    if(data.error) {
+      statusEl.textContent = data.error;
+      statusEl.style.color = 'var(--danger)';
+      return;
+    }
+    // Poll the job
+    const pollDraft = async () => {
+      const job = await fetchJSON('/api/job/' + data.job_id);
+      if(!job) { statusEl.textContent = 'Lost connection'; statusEl.style.color='var(--danger)'; return; }
+      if(job.status === 'running') { setTimeout(pollDraft, 500); return; }
+      if(job.success) {
+        closeNewPathwayDialog();
+        _ceData = {parsed: job.parsed, source: job.source};
+        document.getElementById('ce-title').textContent = 'New Pathway: ' + job.parsed.name;
+        document.getElementById('ce-status').textContent = '';
+        ceRender(job.parsed);
+        document.getElementById('ce-overlay').classList.add('open');
+        document.getElementById('contract-editor').classList.add('open');
+        showToast('Pathway Draft', 'Review and save the generated pathway', false);
+      } else {
+        statusEl.textContent = job.error || 'Generation failed';
+        statusEl.style.color = 'var(--danger)';
+      }
+    };
+    pollDraft();
+  } catch(e) {
+    statusEl.textContent = e.message;
+    statusEl.style.color = 'var(--danger)';
+  }
+}
+
+async function deleteAllele(sha, locus) {
+  if(!confirm('Delete allele ' + sha + ' from ' + locus + '?')) return;
+  try {
+    const resp = await fetch('/api/allele/' + sha, {method:'DELETE'});
+    const data = await resp.json();
+    if(data.ok) { showToast('Deleted', sha + ' removed from ' + locus, false); refreshData(); }
+    else { showToast('Delete Failed', data.error, true); }
+  } catch(e) { showToast('Delete Error', e.message, true); }
+}
+
+async function clearLocusAlleles(locus) {
+  if(!confirm('Delete ALL alleles from ' + locus + '? This cannot be undone.')) return;
+  try {
+    const resp = await fetch('/api/locus/' + locus + '/alleles', {method:'DELETE'});
+    const data = await resp.json();
+    if(data.ok) { showToast('Cleared', data.deleted + ' allele(s) removed from ' + locus, false); refreshData(); }
+    else { showToast('Clear Failed', data.error, true); }
+  } catch(e) { showToast('Clear Error', e.message, true); }
+}
+
+async function resetGenome() {
+  if(!confirm('DELETE ALL ALLELES from ALL loci? This is a full genome reset and cannot be undone.')) return;
+  try {
+    const resp = await fetch('/api/alleles', {method:'DELETE'});
+    const data = await resp.json();
+    if(data.ok) { showToast('Genome Reset', data.deleted + ' allele(s) deleted', false); refreshData(); }
+    else { showToast('Reset Failed', data.error, true); }
+  } catch(e) { showToast('Reset Error', e.message, true); }
+}
+
+async function daemonToggle() {
+  const data = await fetchJSON('/api/daemon/status');
+  if(data && data.running) {
+    await fetch('/api/daemon/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    showToast('Daemon', 'Stopped after ' + data.tick_count + ' ticks', false);
+  } else {
+    const kernel = document.getElementById('cmd-kernel').value;
+    const engine = document.getElementById('cmd-engine').value;
+    const tick_interval = parseFloat(document.getElementById('daemon-interval').value) || 30;
+    await fetch('/api/daemon/start', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({kernel, mutation_engine: engine, tick_interval}),
+    });
+    showToast('Daemon', 'Started (tick every ' + tick_interval + 's, engine: ' + engine + ')', false);
+  }
+  updateDaemonUI();
+}
+
+async function daemonPause() {
+  const resp = await fetch('/api/daemon/pause', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  const data = await resp.json();
+  if(data.ok) showToast('Daemon', data.paused ? 'Paused' : 'Resumed', false);
+  updateDaemonUI();
+}
+
+async function updateDaemonUI() {
   const data = await fetchJSON('/api/daemon/status');
   if(!data) return;
   const dot = document.getElementById('daemon-dot');
   const label = document.getElementById('daemon-label');
+  const tick = document.getElementById('daemon-tick');
+  const toggle = document.getElementById('btn-daemon-toggle');
+  const pause = document.getElementById('btn-daemon-pause');
+
   if(data.running) {
-    dot.className = 'daemon-dot on';
-    label.textContent = 'daemon tick #' + data.tick_count;
+    dot.className = data.paused ? 'daemon-dot paused' : 'daemon-dot on';
+    label.textContent = data.paused ? 'paused' : 'evolving';
+    tick.textContent = '#' + data.tick_count;
+    toggle.textContent = 'Stop';
+    toggle.className = 'btn-daemon-start running';
+    pause.disabled = false;
+    pause.textContent = data.paused ? 'Resume' : 'Pause';
   } else {
-    dot.className = 'daemon-dot off';
-    label.textContent = 'daemon stopped';
+    dot.className = 'daemon-dot';
+    label.textContent = 'stopped';
+    tick.textContent = data.tick_count > 0 ? '(ran ' + data.tick_count + ')' : '';
+    toggle.textContent = 'Start';
+    toggle.className = 'btn-daemon-start';
+    pause.disabled = true;
+    pause.textContent = 'Pause';
+  }
+  if(data.last_tick_error) {
+    label.textContent += ' \u26a0';
+    label.title = data.last_tick_error;
+  } else {
+    label.title = '';
   }
 }
 
-// Extend refreshData to also update command bar selectors and daemon status
 const _origRefreshData = refreshData;
 refreshData = async function() {
   await _origRefreshData();
   updateCommandBarSelectors();
-  updateDaemonStatus();
+  updateDaemonUI();
 };
 
 // ── Init ──
@@ -2833,6 +3701,18 @@ def run_dashboard(
     global _project_root, _metrics_collector
     _project_root = root
     _metrics_collector = metrics_collector
+    import signal
     import uvicorn
-    logger.info("Starting dashboard at http://%s:%d", host, port)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning"))
+
+    def _handle_exit(sig, frame):
+        print("\nShutting down dashboard...")
+        server.should_exit = True
+
+    signal.signal(signal.SIGINT, _handle_exit)
+    signal.signal(signal.SIGTERM, _handle_exit)
+
+    logger.info("Starting dashboard at http://%s:%d (Ctrl+C to stop)", host, port)
+    print(f"Dashboard running at http://{host}:{port}  (Ctrl+C to stop)")
+    server.run()

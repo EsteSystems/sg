@@ -91,6 +91,24 @@ class PhenotypeMap:
         config = self.loci.get(locus)
         return config.dominant if config else None
 
+    def remove_allele(self, locus: str, sha: str) -> None:
+        """Remove an allele from a locus phenotype. If it was dominant, promote next fallback."""
+        config = self.loci.get(locus)
+        if config is None:
+            return
+        if sha in config.fallback:
+            config.fallback.remove(sha)
+        if config.dominant == sha:
+            config.dominant = config.fallback.pop(0) if config.fallback else None
+
+    def clear_locus(self, locus: str) -> None:
+        """Remove all phenotype state for a locus."""
+        self.loci.pop(locus, None)
+
+    def clear_all_loci(self) -> None:
+        """Remove all gene locus phenotype state."""
+        self.loci.clear()
+
     # --- Fusion state ---
 
     def get_fused(self, pathway: str) -> PathwayFusionConfig | None:

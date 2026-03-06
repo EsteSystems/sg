@@ -9,9 +9,9 @@ gene ingest_csv_to_table for data
     resource for rollback.
 
   takes:
-    url         string  "URL to fetch CSV data from"
-    connection  string  "Database connection name"
-    table       string  "Target table name"
+    url         string  "URL to fetch CSV data from"  default="https://people.sc.fsu.edu/~jburkardt/data/csv/airtravel.csv"
+    connection  string  "Database connection name"     default="warehouse"
+    table       string  "Target table name"            default="airtravel"
 
   gives:
     success        bool    "Whether the ingest completed"

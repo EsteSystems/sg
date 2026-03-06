@@ -6,14 +6,14 @@ pathway ingest_clean_and_load for data
     transform to warehouse schema, then verify data quality.
 
   takes:
-    url               string    "URL to fetch CSV data from"
-    connection        string    "Database connection name"
-    table             string    "Staging table name"
-    target_table      string    "Warehouse target table name"
-    column            string    "Column to check for nulls"
-    expected_columns  string[]  "Expected column names for schema validation"
-    clean_rules       object    "Cleaning rules"
-    transform_mapping object    "Column mapping for transformation"
+    url               string    "URL to fetch CSV data from"                   default="https://people.sc.fsu.edu/~jburkardt/data/csv/airtravel.csv"
+    connection        string    "Database connection name"                      default="warehouse"
+    table             string    "Staging table name"                            default="airtravel_staging"
+    target_table      string    "Warehouse target table name"                  default="airtravel"
+    column            string    "Column to check for nulls"                    default="Month"
+    expected_columns  string[]  "Expected column names for schema validation"  default="Month,1958,1959,1960"
+    clean_rules       object    "Cleaning rules"                               default="{}"
+    transform_mapping object    "Column mapping for transformation"            default="{}"
 
   steps:
     1. ingest_csv_to_table

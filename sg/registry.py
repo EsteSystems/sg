@@ -185,6 +185,44 @@ class Registry:
         logger.info("recovered %d allele(s) from source files", recovered)
         return recovered
 
+    def delete_allele(self, sha: str) -> bool:
+        """Remove a single allele from the registry. Returns True if found."""
+        meta = self.alleles.pop(sha, None)
+        if meta is None:
+            return False
+        shas = self._locus_index.get(meta.locus, [])
+        if sha in shas:
+            shas.remove(sha)
+        source_path = self.source_path(sha)
+        if source_path.exists():
+            source_path.unlink()
+        logger.info("deleted allele %s from locus %s", sha[:12], meta.locus)
+        return True
+
+    def delete_locus(self, locus: str) -> int:
+        """Remove all alleles for a locus. Returns count deleted."""
+        shas = list(self._locus_index.pop(locus, []))
+        count = 0
+        for sha in shas:
+            self.alleles.pop(sha, None)
+            source_path = self.source_path(sha)
+            if source_path.exists():
+                source_path.unlink()
+            count += 1
+        logger.info("deleted %d allele(s) from locus %s", count, locus)
+        return count
+
+    def delete_all(self) -> int:
+        """Remove all alleles from all loci. Returns count deleted."""
+        count = len(self.alleles)
+        self.alleles.clear()
+        self._locus_index.clear()
+        if self.sources_dir.exists():
+            for path in self.sources_dir.glob("*.py"):
+                path.unlink()
+        logger.info("deleted all %d allele(s)", count)
+        return count
+
     @classmethod
     def open(cls, root: Path) -> Registry:
         reg = cls(root)

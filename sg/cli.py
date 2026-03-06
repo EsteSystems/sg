@@ -52,27 +52,26 @@ def make_mutation_engine(
     if kernel is not None:
         extra["kernel"] = kernel
 
-    if engine == "claude":
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+    def _require_key(env_var: str, engine_label: str) -> str:
+        api_key = os.environ.get(env_var)
         if not api_key:
-            print("error: --mutation-engine=claude requires ANTHROPIC_API_KEY", file=sys.stderr)
-            sys.exit(1)
+            raise EnvironmentError(
+                f"--mutation-engine={engine_label} requires {env_var}"
+            )
+        return api_key
+
+    if engine == "claude":
+        api_key = _require_key("ANTHROPIC_API_KEY", "claude")
         from sg.mutation import ClaudeMutationEngine
         return ClaudeMutationEngine(api_key, contract_store, cache=cache, **extra)
 
     if engine == "openai":
-        api_key = os.environ.get("OPENAI_API_KEY")
-        if not api_key:
-            print("error: --mutation-engine=openai requires OPENAI_API_KEY", file=sys.stderr)
-            sys.exit(1)
+        api_key = _require_key("OPENAI_API_KEY", "openai")
         from sg.mutation import OpenAIMutationEngine
         return OpenAIMutationEngine(api_key, contract_store, cache=cache, **extra)
 
     if engine == "deepseek":
-        api_key = os.environ.get("DEEPSEEK_API_KEY")
-        if not api_key:
-            print("error: --mutation-engine=deepseek requires DEEPSEEK_API_KEY", file=sys.stderr)
-            sys.exit(1)
+        api_key = _require_key("DEEPSEEK_API_KEY", "deepseek")
         from sg.mutation import DeepSeekMutationEngine
         return DeepSeekMutationEngine(api_key, contract_store, cache=cache, **extra)
 
@@ -96,7 +95,7 @@ def make_kernel(args: argparse.Namespace):
 
     Uses entry-point discovery to find and instantiate the kernel.
     """
-    kernel_name = getattr(args, "kernel", "mock")
+    kernel_name = getattr(args, "kernel", "data-mock")
     try:
         return load_kernel(kernel_name)
     except (KernelNotFoundError, KernelLoadError) as e:
@@ -152,16 +151,13 @@ def cmd_init(args: argparse.Namespace) -> None:
     genes_dir = root / "genes"
     contract_store = load_contract_store(root)
 
-    if not genes_dir.exists():
-        print(f"error: genes directory not found at {genes_dir}", file=sys.stderr)
-        sys.exit(1)
-
     registry = Registry.open(root / ".sg" / "registry")
     phenotype = PhenotypeMap()
 
-    seeds = _discover_seed_genes(genes_dir, contract_store.known_loci())
-    if not seeds:
-        print("warning: no seed genes found matching known loci")
+    # Phase 1: discover hand-written seed files
+    seeds: dict[str, Path] = {}
+    if genes_dir.exists():
+        seeds = _discover_seed_genes(genes_dir, contract_store.known_loci())
 
     for locus, gene_path in seeds.items():
         source = gene_path.read_text()
@@ -173,6 +169,37 @@ def cmd_init(args: argparse.Namespace) -> None:
             allele.state = "dominant"
 
         print(f"  registered {locus} → {sha[:12]}")
+
+    # Phase 2: LLM-generate seeds for loci with no hand-written file
+    unseeded = [l for l in contract_store.known_loci() if l not in seeds]
+    if unseeded:
+        engine_name = getattr(args, "mutation_engine", "auto")
+        if engine_name == "mock":
+            print(f"  {len(unseeded)} locus/loci have no seed files (skipping LLM generation in mock mode)")
+        else:
+            kernel = make_kernel(args)
+            mutation_engine = make_mutation_engine(args, root, contract_store, kernel=kernel)
+            print(f"  generating seeds for {len(unseeded)} locus/loci via LLM...")
+            for locus in unseeded:
+                gene_contract = contract_store.get_gene(locus)
+                if gene_contract is None:
+                    continue
+                if hasattr(mutation_engine, '_contract_prompt'):
+                    contract_prompt = mutation_engine._contract_prompt(locus)
+                else:
+                    info = contract_store.contract_info(locus)
+                    contract_prompt = f"Locus: {locus}\nDescription: {info.description}"
+                try:
+                    sources = mutation_engine.generate(locus, contract_prompt, 1)
+                    if sources:
+                        sha = registry.register(sources[0], locus, generation=0)
+                        phenotype.promote(locus, sha)
+                        allele = registry.get(sha)
+                        if allele:
+                            allele.state = "dominant"
+                        print(f"  generated {locus} → {sha[:12]}")
+                except Exception as e:
+                    print(f"  failed to generate {locus}: {e}")
 
     registry.save_index()
     phenotype.save(root / "phenotype.toml")

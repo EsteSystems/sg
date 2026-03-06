@@ -71,8 +71,16 @@ class MockNetworkKernel(NetworkKernel):
     """In-memory network simulation. Injected into genes as `gene_sdk`."""
 
     def create_shadow(self) -> MockNetworkKernel:
-        """Return a fresh mock kernel for shadow execution."""
-        return MockNetworkKernel()
+        """Return a copy of this kernel for shadow execution."""
+        import copy
+        shadow = MockNetworkKernel()
+        shadow._bridges = copy.deepcopy(self._bridges)
+        shadow._bonds = copy.deepcopy(self._bonds)
+        shadow._vlans = copy.deepcopy(self._vlans)
+        shadow._interfaces = copy.deepcopy(self._interfaces)
+        shadow._fdb = copy.deepcopy(self._fdb)
+        shadow._arp_table = copy.deepcopy(self._arp_table)
+        return shadow
 
     def __init__(self) -> None:
         self._bridges: dict[str, BridgeState] = {}

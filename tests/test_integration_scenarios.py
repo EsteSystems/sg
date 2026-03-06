@@ -140,20 +140,21 @@ INGEST_INPUT = json.dumps({
 class TestScenarioA_GeneMutation:
     """Gene mutation cycle: failure handling, mutation, fitness tracking."""
 
-    def test_graceful_failure_returns_success_false(self, scenario):
-        """Genes that catch errors return success=false (no mutation needed)."""
+    def test_graceful_failure_triggers_mutation(self, scenario):
+        """Genes that catch errors return success=false, triggering mutation."""
         orch = scenario["orch"]
         setup_kernel(orch.kernel)
 
         # inject_failure causes RuntimeError which the gene catches
+        # and returns success=false — but validate_output rejects success=false,
+        # so the orchestrator treats it as a failure and enters the mutation cycle.
         orch.kernel.inject_failure("http_get", "simulated network timeout")
         result = orch.execute_locus("ingest_csv_to_table", INGEST_INPUT)
 
+        # The mutation fixture recovers — result is from the mutant gene
         assert result is not None
         output = json.loads(result[0])
-        # Gene caught the error gracefully — valid output, no mutation
-        assert output["success"] is False
-        assert "timeout" in output.get("error", "")
+        assert output["success"] is True
 
     def test_mutation_on_uncaught_error(self, scenario):
         """When all alleles raise, mutation triggers and fixture recovers."""

@@ -4,7 +4,7 @@ import pytest
 
 from sg.kernel.base import Kernel
 from sg.kernel.stub import StubKernel
-from sg_network import MockNetworkKernel
+from sg_data import MockDataKernel, ProductionDataKernel
 from sg.kernel.discovery import (
     discover_kernels,
     list_kernel_names,
@@ -20,16 +20,14 @@ class TestDiscoverKernels:
     def test_discovers_builtin_kernels(self):
         kernels = discover_kernels()
         assert "stub" in kernels
-        assert "mock" in kernels
-        assert "network-mock" in kernels
-        assert "production" in kernels
-        assert "network-production" in kernels
+        assert "data-mock" in kernels
+        assert "data-production" in kernels
 
     def test_list_kernel_names_sorted(self):
         names = list_kernel_names()
         assert names == sorted(names)
         assert "stub" in names
-        assert "mock" in names
+        assert "data-mock" in names
 
     def test_discover_returns_entry_points(self):
         kernels = discover_kernels()
@@ -44,23 +42,13 @@ class TestLoadKernel:
         assert isinstance(kernel, StubKernel)
         assert isinstance(kernel, Kernel)
 
-    def test_load_mock(self):
-        kernel = load_kernel("mock")
-        assert isinstance(kernel, MockNetworkKernel)
+    def test_load_data_mock(self):
+        kernel = load_kernel("data-mock")
+        assert isinstance(kernel, MockDataKernel)
 
-    def test_load_network_mock(self):
-        kernel = load_kernel("network-mock")
-        assert isinstance(kernel, MockNetworkKernel)
-
-    def test_load_production(self):
-        from sg_network import ProductionNetworkKernel
-        kernel = load_kernel("production")
-        assert isinstance(kernel, ProductionNetworkKernel)
-
-    def test_load_network_production(self):
-        from sg_network import ProductionNetworkKernel
-        kernel = load_kernel("network-production")
-        assert isinstance(kernel, ProductionNetworkKernel)
+    def test_load_data_production(self):
+        kernel = load_kernel("data-production")
+        assert isinstance(kernel, ProductionDataKernel)
 
     def test_load_unknown_raises(self):
         with pytest.raises(KernelNotFoundError, match="unknown kernel"):
@@ -77,7 +65,7 @@ class TestLoadKernelClass:
         assert cls is StubKernel
 
     def test_class_is_kernel_subclass(self):
-        cls = load_kernel_class("mock")
+        cls = load_kernel_class("data-mock")
         assert issubclass(cls, Kernel)
 
 

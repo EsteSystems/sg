@@ -5,21 +5,21 @@ import pytest
 from sg.cli import make_kernel
 from sg.kernel.base import Kernel
 from sg.kernel.stub import StubKernel
-from sg_network import MockNetworkKernel
+from sg_data import MockDataKernel, ProductionDataKernel
 
 
 class TestKernelSelection:
-    def test_default_kernel_is_mock(self):
-        """No --kernel flag defaults to MockNetworkKernel (backward compat)."""
-        args = argparse.Namespace(kernel="mock")
+    def test_default_kernel_is_data_mock(self):
+        """No --kernel flag defaults to MockDataKernel."""
+        args = argparse.Namespace(kernel="data-mock")
         kernel = make_kernel(args)
-        assert isinstance(kernel, MockNetworkKernel)
+        assert isinstance(kernel, MockDataKernel)
 
-    def test_missing_kernel_attr_defaults_mock(self):
-        """If kernel attr missing, defaults to mock."""
+    def test_missing_kernel_attr_defaults_data_mock(self):
+        """If kernel attr missing, defaults to data-mock."""
         args = argparse.Namespace()
         kernel = make_kernel(args)
-        assert isinstance(kernel, MockNetworkKernel)
+        assert isinstance(kernel, MockDataKernel)
 
     def test_stub_kernel(self):
         """--kernel=stub creates StubKernel."""
@@ -27,25 +27,17 @@ class TestKernelSelection:
         kernel = make_kernel(args)
         assert isinstance(kernel, StubKernel)
 
-    def test_network_mock_alias(self):
-        """--kernel=network-mock creates MockNetworkKernel."""
-        args = argparse.Namespace(kernel="network-mock")
+    def test_data_mock_alias(self):
+        """--kernel=data-mock creates MockDataKernel."""
+        args = argparse.Namespace(kernel="data-mock")
         kernel = make_kernel(args)
-        assert isinstance(kernel, MockNetworkKernel)
+        assert isinstance(kernel, MockDataKernel)
 
-    def test_production_kernel_flag(self):
-        """--kernel=production creates ProductionNetworkKernel."""
-        args = argparse.Namespace(kernel="production")
+    def test_data_production_kernel_flag(self):
+        """--kernel=data-production creates ProductionDataKernel."""
+        args = argparse.Namespace(kernel="data-production")
         kernel = make_kernel(args)
-        from sg_network import ProductionNetworkKernel
-        assert isinstance(kernel, ProductionNetworkKernel)
-
-    def test_network_production_alias(self):
-        """--kernel=network-production creates ProductionNetworkKernel."""
-        args = argparse.Namespace(kernel="network-production")
-        kernel = make_kernel(args)
-        from sg_network import ProductionNetworkKernel
-        assert isinstance(kernel, ProductionNetworkKernel)
+        assert isinstance(kernel, ProductionDataKernel)
 
     def test_unknown_kernel_exits(self, capsys):
         """Unknown kernel name prints error and exits."""

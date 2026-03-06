@@ -432,6 +432,7 @@ class TestTopologyEvolutionIntegration:
         topology_name = "production_server"
 
         orch.run_topology(topology_name, self._topology_input())
+        orch.kernel.reset()  # clear state so second run doesn't hit "already exists"
         orch.run_topology(topology_name, self._topology_input())
 
         stack = orch.phenotype.get_topology_stack(topology_name)
